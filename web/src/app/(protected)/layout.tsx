@@ -14,6 +14,7 @@ function Shell({ children }: { children: ReactNode }) {
         <nav className="shell-nav" aria-label="Main">
           <Link href="/">Home</Link>
           <Link href="/leads">Leads</Link>
+          <Link href="/calendar">Calendar</Link>
           <Link href="/account">Account</Link>
           {user.role === "owner" && <Link href="/fields">Fields</Link>}
           {user.role === "owner" && <Link href="/settings">Settings</Link>}

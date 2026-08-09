@@ -24,6 +24,34 @@ const SETTINGS = {
   response_target_minutes: 5,
 };
 
+const SCHEDULING = {
+  business_timezone: "America/New_York",
+  appointment_duration_minutes: 60,
+  min_booking_notice_minutes: 120,
+  max_booking_days_ahead: 60,
+  buffer_before_minutes: 0,
+  buffer_after_minutes: 15,
+  self_booking_enabled: true,
+  appointment_confirmation_enabled: true,
+  appointment_reminder_enabled: true,
+  reminder_offset_minutes: 1440,
+  second_reminder_offset_minutes: null,
+  upcoming_window_hours: 48,
+  confirmation_template: "Hi {{lead_name}}, you are booked for {{appointment_date}}.",
+  reminder_template: "Reminder: {{appointment_time}} with {{business_name}}.",
+  appointment_canceled_template: "Your {{appointment_date}} appointment is canceled.",
+  appointment_rescheduled_template: "Moved to {{appointment_date}} at {{appointment_time}}.",
+  business_hours: {
+    mon: [["09:00", "17:00"]],
+    tue: [["09:00", "17:00"]],
+    wed: [["09:00", "17:00"]],
+    thu: [["09:00", "17:00"]],
+    fri: [["09:00", "17:00"]],
+    sat: [],
+    sun: [],
+  },
+};
+
 function renderSettings(
   role: "owner" | "manager" = "owner",
   save: { status: number; body: unknown } = { status: 200, body: SETTINGS },
@@ -31,6 +59,7 @@ function renderSettings(
   const fetchMock = stubFetchRoutes([
     ["/auth/session", { status: 200, body: { user: makeUser({ role }), csrf_token: "csrf" } }],
     ["/settings/communication", { status: 200, body: SETTINGS }],
+    ["/settings/scheduling", { status: 200, body: SCHEDULING }],
   ]);
   render(
     <ProtectedLayout>
@@ -97,6 +126,9 @@ test("surfaces a server validation error", async () => {
           Promise.resolve({ detail: "Unknown template variables: secret_field" }),
       });
     }
+    if (url.includes("/settings/scheduling")) {
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SCHEDULING) });
+    }
     return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SETTINGS) });
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -110,4 +142,40 @@ test("surfaces a server validation error", async () => {
   await waitFor(() =>
     expect(screen.getByRole("alert")).toHaveTextContent("Unknown template variables"),
   );
+});
+
+test("owner sees the scheduling configuration alongside messaging", async () => {
+  renderSettings();
+  expect(await screen.findByLabelText("Business time zone")).toHaveValue("America/New_York");
+  expect(screen.getByLabelText("Default appointment length (minutes)")).toHaveValue(60);
+  expect(screen.getByLabelText("Buffer after an appointment (minutes)")).toHaveValue(15);
+  expect(screen.getByLabelText(/Let customers book/)).toBeChecked();
+  expect(screen.getByLabelText("Monday opens")).toHaveValue("09:00");
+  // Closed days are shown as closed, not as an empty window.
+  expect(screen.getByLabelText("Saturday", { selector: "input" })).not.toBeChecked();
+  expect(screen.getAllByText(/\{\{appointment_date\}\}/).length).toBeGreaterThan(0);
+});
+
+test("saves scheduling changes, turning a closed day into an open window", async () => {
+  const { fetchMock } = renderSettings();
+  fireEvent.change(await screen.findByLabelText("Business time zone"), {
+    target: { value: "America/Chicago" },
+  });
+  fireEvent.click(screen.getByLabelText("Saturday", { selector: "input" }));
+  fireEvent.change(screen.getByLabelText("Saturday opens"), { target: { value: "10:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save scheduling settings" }));
+
+  await waitFor(() => {
+    const patch = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        (init as RequestInit | undefined)?.method === "PATCH" &&
+        String(url).includes("/settings/scheduling"),
+    );
+    expect(patch).toBeDefined();
+    const body = JSON.parse(String((patch![1] as RequestInit).body));
+    expect(body.business_timezone).toBe("America/Chicago");
+    expect(body.business_hours.sat).toEqual([["10:00", "17:00"]]);
+    expect(body.business_hours.sun).toEqual([]);
+    expect((patch![1] as RequestInit).headers).toMatchObject({ "X-CSRF-Token": "csrf" });
+  });
 });

@@ -91,6 +91,8 @@ a {
 
 .form-field input,
 .form-field select {
+  /* A long option (a staff email) must never widen the page. */
+  max-width: 100%;
   padding: 0.5rem;
   border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
   border-radius: 4px;
@@ -160,7 +162,8 @@ button:disabled {
 
 .shell-nav {
   display: flex;
-  gap: 1rem;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
 }
 
 .shell-nav a {
@@ -493,4 +496,204 @@ button:disabled {
 .char-count {
   font-size: 0.8rem;
   opacity: 0.75;
+}
+
+/* Scheduling */
+
+.slot-list {
+  border: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.slot-list legend {
+  padding: 0 0.35rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.slot-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.slot-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 30%, transparent);
+  border-radius: 999px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  /* Comfortably tappable on a phone in a customer's hand. */
+  min-height: 2.5rem;
+}
+
+.slot-option.selected {
+  border-color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  font-weight: 600;
+}
+
+.appointments-panel h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 1rem;
+}
+
+.appointment-list,
+.calendar-items,
+.calendar-agenda {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.appointment-item {
+  border-left: 3px solid color-mix(in srgb, var(--foreground) 25%, transparent);
+  padding-left: 0.75rem;
+}
+
+.appointment-item.status-canceled,
+.calendar-item.status-canceled {
+  opacity: 0.65;
+  text-decoration-line: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.appointment-item.status-no_show,
+.calendar-item.status-no_show {
+  border-left-color: #b3261e;
+}
+
+.appointment-meta,
+.appointment-notes {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.appointment-notes {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.appointment-reschedule {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px dashed color-mix(in srgb, var(--foreground) 30%, transparent);
+  border-radius: 6px;
+}
+
+.booking-link-value {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0.5rem 0;
+}
+
+.booking-link-value input {
+  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  overflow-wrap: anywhere;
+}
+
+/* Calendar */
+
+.calendar-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 1rem;
+  margin: 0.75rem 0;
+  /* Long staff email addresses must not stretch the page sideways. */
+  max-width: 100%;
+}
+
+.calendar-controls .form-field {
+  min-width: 0;
+}
+
+.calendar-zone {
+  font-size: 0.85rem;
+  opacity: 0.8;
+  margin-bottom: 0.75rem;
+}
+
+.calendar-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.calendar-grid.week {
+  /* Collapses to a single readable column on narrow screens. */
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+}
+
+.calendar-day {
+  border: 1px solid color-mix(in srgb, var(--foreground) 18%, transparent);
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+
+.calendar-day.today {
+  border-color: var(--foreground);
+}
+
+.calendar-day h2 {
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+
+.calendar-empty {
+  font-size: 0.85rem;
+  opacity: 0.7;
+}
+
+.calendar-item {
+  font-size: 0.9rem;
+  border-left: 3px solid color-mix(in srgb, var(--foreground) 25%, transparent);
+  padding-left: 0.6rem;
+  overflow-wrap: anywhere;
+}
+
+.calendar-time {
+  font-weight: 600;
+}
+
+.calendar-subject,
+.calendar-status,
+.calendar-who {
+  opacity: 0.85;
+}
+
+.calendar-items a,
+.calendar-agenda a {
+  text-decoration: underline;
+}
+
+.business-hours-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.business-hours-row label {
+  min-width: 9rem;
+}
+
+.business-hours-row input[type="time"] {
+  padding: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
 }

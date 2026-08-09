@@ -59,6 +59,11 @@ export async function api<T = unknown>(
   return { ok: response.ok, status: response.status, data };
 }
 
+/** Absolute URL for a versioned API path — for responses that are not JSON. */
+export function apiUrl(path: string): string {
+  return `${API_URL}/api/v1${path}`;
+}
+
 export type Lead = {
   id: string;
   name: string;
@@ -105,18 +110,33 @@ export type Activity = {
   created_at: string;
 };
 
+export type AttentionAppointment = {
+  id: string;
+  lead_id: string;
+  lead_name: string | null;
+  subject: string;
+  start_at: string;
+  timezone: string;
+  status: string;
+  detail: string | null;
+};
+
 export type AttentionQueue = {
   overdue: Lead[];
   due_today: Lead[];
   unassigned: Lead[];
   needs_review: Lead[];
   unresponded: Lead[];
+  appointments_overdue: AttentionAppointment[];
+  appointments_upcoming: AttentionAppointment[];
+  appointment_messages_failed: AttentionAppointment[];
+  appointment_messages_unknown: AttentionAppointment[];
 };
 
 export type OutboundMessage = {
   id: string;
   lead_id: string;
-  purpose: "human_reply" | "auto_acknowledgment" | "staff_alert";
+  purpose: "human_reply" | "auto_acknowledgment" | "staff_alert" | "appointment";
   to_phone: string;
   body: string;
   status: "pending" | "submitted" | "delivered" | "failed" | "unknown";
@@ -156,6 +176,106 @@ export type AssignableUser = {
   id: string;
   email: string;
   role: Role;
+};
+
+export type AppointmentStatus = "scheduled" | "completed" | "canceled" | "no_show";
+
+export type Appointment = {
+  id: string;
+  lead_id: string;
+  lead_name: string | null;
+  assigned_to: string | null;
+  assignee_email: string | null;
+  subject: string;
+  notes: string;
+  start_at: string;
+  end_at: string;
+  timezone: string;
+  status: AppointmentStatus;
+  origin: "staff" | "customer";
+  booking_reference: string | null;
+  cancellation_reason: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type AppointmentNotification = {
+  id: string;
+  appointment_id: string;
+  type: "confirmation" | "reminder" | "rescheduled" | "canceled";
+  occurrence: string;
+  scheduled_at: string;
+  state: "pending" | "claimed" | "sent" | "failed" | "unknown" | "suppressed";
+  failure_message: string | null;
+};
+
+export type AvailabilityDay = {
+  date: string;
+  timezone: string;
+  duration_minutes: number;
+  slots: string[];
+};
+
+export type BookingLink = {
+  id: string;
+  lead_id: string;
+  assigned_to: string | null;
+  expires_at: string;
+  revoked_at: string | null;
+  duration_minutes: number | null;
+  created_at: string;
+  last_used_at: string | null;
+  /** Present only in the response that creates the link — never stored. */
+  url: string | null;
+};
+
+/** The subset every scheduler needs; readable by any authenticated user. */
+export type SchedulingBasics = {
+  business_timezone: string;
+  appointment_duration_minutes: number;
+  min_booking_notice_minutes: number;
+  max_booking_days_ahead: number;
+  self_booking_enabled: boolean;
+  business_hours: Record<string, string[][]> | null;
+};
+
+export type SchedulingSettings = {
+  business_timezone: string;
+  appointment_duration_minutes: number;
+  min_booking_notice_minutes: number;
+  max_booking_days_ahead: number;
+  buffer_before_minutes: number;
+  buffer_after_minutes: number;
+  self_booking_enabled: boolean;
+  appointment_confirmation_enabled: boolean;
+  appointment_reminder_enabled: boolean;
+  reminder_offset_minutes: number;
+  second_reminder_offset_minutes: number | null;
+  upcoming_window_hours: number;
+  confirmation_template: string;
+  reminder_template: string;
+  appointment_canceled_template: string;
+  appointment_rescheduled_template: string;
+  business_hours: Record<string, string[][]> | null;
+};
+
+export const WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+
+export const WEEKDAY_LABELS: Record<string, string> = {
+  mon: "Monday",
+  tue: "Tuesday",
+  wed: "Wednesday",
+  thu: "Thursday",
+  fri: "Friday",
+  sat: "Saturday",
+  sun: "Sunday",
+};
+
+export const APPOINTMENT_STATUS_LABELS: Record<string, string> = {
+  scheduled: "Scheduled",
+  completed: "Completed",
+  canceled: "Canceled",
+  no_show: "No-show",
 };
 
 export const LEAD_STATUSES = ["new", "contacted", "qualified", "won", "lost"] as const;

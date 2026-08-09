@@ -2,6 +2,7 @@
 
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { AppointmentsPanel } from "@/components/appointments-panel";
 import { useAuth } from "@/components/auth-context";
 import { CustomFieldInputs } from "@/components/custom-field-inputs";
 import { LeadBadges, sourceLabel, statusLabel } from "@/components/lead-badges";
@@ -244,6 +245,15 @@ export default function LeadDetailPage() {
             canSend={canManage || lead.assigned_to === user.id}
             onChanged={reload}
           />
+          <AppointmentsPanel
+            lead={lead}
+            csrfToken={csrfToken}
+            canSchedule={canManage || lead.assigned_to === user.id}
+            // A team member may only ever schedule for themselves, so that is
+            // the only option they are offered.
+            users={canManage ? users : [{ id: user.id, email: user.email, role: user.role }]}
+            onChanged={reload}
+          />
           <Timeline activities={activities} />
         </div>
       </div>
@@ -467,6 +477,13 @@ const ACTIVITY_LABELS: Record<string, string> = {
   follow_up_cleared: "Follow-up cleared",
   archived: "Archived",
   restored: "Restored",
+  appointment_scheduled: "Appointment scheduled",
+  appointment_rescheduled: "Appointment moved",
+  appointment_canceled: "Appointment canceled",
+  appointment_completed: "Appointment completed",
+  appointment_no_show: "Appointment no-show",
+  booking_link_created: "Booking link created",
+  booking_link_revoked: "Booking link revoked",
 };
 
 function Timeline({ activities }: { activities: Activity[] }) {

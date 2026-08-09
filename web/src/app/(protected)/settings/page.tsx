@@ -2,6 +2,7 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
+import { SchedulingSettingsForm } from "@/components/scheduling-settings-form";
 import { api, errorDetail, type CommunicationSettings } from "@/lib/api";
 
 const TEMPLATE_VARIABLES = ["lead_name", "business_name", "source", "lead_id"];
@@ -194,6 +195,8 @@ export default function CommunicationSettingsPage() {
           {saving ? "Saving…" : "Save settings"}
         </button>
       </form>
+
+      <SchedulingSettingsForm csrfToken={csrfToken} />
     </section>
   );
 }
