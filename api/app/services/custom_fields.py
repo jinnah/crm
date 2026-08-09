@@ -156,6 +156,8 @@ def apply_custom_values(
         value = _validate_value(definition, raw)
         row = existing.get(definition.id)
         if value is None:
+            if definition.required and definition.is_active and row is not None:
+                raise LeadError(f"{definition.label} is required and cannot be cleared.")
             if row is not None:
                 db.delete(row)
             continue

@@ -1,0 +1,301 @@
+{
+  "name": "WhatsApp Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meta-whatsapp",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "wh-meta-whatsapp-post",
+      "name": "WhatsApp Intake Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "meta-whatsapp-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Meta webhook authenticity: X-Hub-Signature-256 is HMAC-SHA256 of the raw\n// request body, keyed with the app secret.\nfunction metaBodyIfValid(item) {\n  const crypto = require('crypto');\n  const headers = item.json.headers || {};\n  const secret = $env.META_APP_SECRET || '';\n  let raw;\n  if (item.binary && item.binary.data && item.binary.data.data) {\n    raw = Buffer.from(item.binary.data.data, 'base64').toString('utf8');\n  } else {\n    raw = JSON.stringify(item.json.body || {});\n  }\n  const provided = headers['x-hub-signature-256'] || '';\n  if (!secret || !provided.startsWith('sha256=')) return null;\n  const expected = 'sha256=' + crypto.createHmac('sha256', secret).update(raw, 'utf8').digest('hex');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(provided);\n  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;\n  return JSON.parse(raw);\n}\nconst item = $input.all()[0];\nconst payload = metaBodyIfValid(item);\nif (payload === null) {\n  return [{ json: { reject: true, status: 403, message: 'invalid signature' } }];\n}\n\nconst out = [];\nfor (const entry of payload.entry || []) {\n  for (const change of entry.changes || []) {\n    const value = change.value || {};\n    const names = {};\n    for (const contact of value.contacts || []) {\n      names[contact.wa_id] = (contact.profile && contact.profile.name) || null;\n    }\n    for (const msg of value.messages || []) {\n      const waId = msg.from || '';\n      let content;\n      let eventType = 'message';\n      if (msg.type === 'text' && msg.text) {\n        content = msg.text.body;\n      } else {\n        // Unsupported media: record a useful activity without storing media.\n        content = '[' + (msg.type || 'unknown') + ' message received - media not stored]';\n        eventType = 'media_message';\n      }\n      out.push({\n        json: {\n          reject: false,\n          idempotency_key: 'meta:whatsapp:' + msg.id,\n          event: {\n            channel: 'whatsapp',\n            provider: 'meta',\n            external_event_id: msg.id,\n            event_type: eventType,\n            sender_name: names[waId] || null,\n            sender_phone: waId ? '+' + waId : null,\n            external_sender_id: waId || null,\n            content,\n            received_at: msg.timestamp\n              ? new Date(Number(msg.timestamp) * 1000).toISOString()\n              : new Date().toISOString(),\n            metadata: {\n              phone_number_id: (value.metadata && value.metadata.phone_number_id) || null,\n              display_phone_number: (value.metadata && value.metadata.display_phone_number) || null,\n              message_type: msg.type || null,\n            },\n          },\n        },\n      });\n    }\n  }\n}\nif (out.length === 0) {\n  // Status/read receipts and similar: acknowledge without a CRM write.\n  return [{ json: { reject: true, status: 200, message: 'no messages' } }];\n}\nreturn out;\n"
+      },
+      "id": "code-normalize",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-reject?",
+      "name": "Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {}
+      },
+      "id": "crm-write",
+      "name": "CRM Write",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'ok', lead_id: $json.lead_id, activity_id: $json.activity_id, replayed: $json.replayed}) }}"
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-reject",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "meta-whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-meta-whatsapp-get",
+      "name": "WhatsApp Intake Verify Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        400
+      ],
+      "webhookId": "meta-whatsapp-get"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Meta webhook subscription verification (GET hub.challenge handshake).\nconst item = $input.all()[0];\nconst query = item.json.query || {};\nconst token = $env.META_VERIFY_TOKEN || '';\nif (query['hub.mode'] === 'subscribe' && token && query['hub.verify_token'] === token) {\n  return [{ json: { reject: false, challenge: query['hub.challenge'] || '' } }];\n}\nreturn [{ json: { reject: true, status: 403, message: 'verification failed' } }];\n"
+      },
+      "id": "code-verify-subscription",
+      "name": "Verify Subscription",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-verify-reject?",
+      "name": "Verify Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.challenge }}"
+      },
+      "id": "respond-challenge",
+      "name": "Respond Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-verify-reject",
+      "name": "Respond Verify Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        560
+      ]
+    }
+  ],
+  "connections": {
+    "WhatsApp Intake Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Write": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Intake Verify Webhook": {
+      "main": [
+        [
+          {
+            "node": "Verify Subscription",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Subscription": {
+      "main": [
+        [
+          {
+            "node": "Verify Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Verify Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

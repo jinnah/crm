@@ -149,3 +149,29 @@ def test_team_member_can_set_values_on_assigned_lead(client, make_user, db) -> N
         ).status_code
         == 403
     )
+
+
+def test_required_active_field_cannot_be_cleared(client, make_user) -> None:
+    headers = owner_session(client, make_user)
+    define_field(client, headers, key="job_type", label="Job type", type="text", required=True)
+    define_field(client, headers, key="notes_opt", label="Optional note", type="text")
+    lead = create_lead(
+        client, headers, custom_values={"job_type": "Repair", "notes_opt": "keep me"}
+    ).json()
+
+    cleared = client.patch(
+        f"/api/v1/leads/{lead['id']}",
+        json={"custom_values": {"job_type": None}},
+        headers=headers,
+    )
+    assert cleared.status_code == 400
+    assert "cannot be cleared" in cleared.json()["detail"]
+
+    # Optional values can still be cleared, and the required value survives.
+    ok = client.patch(
+        f"/api/v1/leads/{lead['id']}",
+        json={"custom_values": {"notes_opt": None}},
+        headers=headers,
+    )
+    assert ok.status_code == 200
+    assert ok.json()["custom_values"] == {"job_type": "Repair"}

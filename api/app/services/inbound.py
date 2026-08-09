@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
-from app.models import InboundEvent, Lead, LeadActivity
+from app.models import InboundEvent, Lead, LeadActivity, LeadExternalIdentity
 from app.security.tokens import digest_token
 from app.services.leads import add_activity, clean_optional_email, normalize_phone
 
@@ -23,7 +23,7 @@ class InboundResult:
 
 
 class InboundConflictError(Exception):
-    """Raised when a concurrent request with the same idempotency key won."""
+    """Raised when concurrent duplicates cannot be reconciled after retrying."""
 
 
 def _find_replay(db: Session, digest: str) -> InboundResult | None:
@@ -36,6 +36,33 @@ def _find_replay(db: Session, digest: str) -> InboundResult | None:
     return InboundResult(
         lead=lead, activity=activity, lead_created=event.lead_created, replayed=True
     )
+
+
+def _find_external_identity(db: Session, payload: Any) -> Lead | None:
+    if not payload.external_sender_id:
+        return None
+    identity = db.scalar(
+        select(LeadExternalIdentity).where(
+            LeadExternalIdentity.channel == payload.channel,
+            LeadExternalIdentity.provider == (payload.provider or ""),
+            LeadExternalIdentity.external_sender_id == payload.external_sender_id,
+        )
+    )
+    return db.get(Lead, identity.lead_id) if identity is not None else None
+
+
+def _attach_external_identity(db: Session, payload: Any, lead: Lead) -> None:
+    if not payload.external_sender_id:
+        return
+    db.add(
+        LeadExternalIdentity(
+            channel=payload.channel,
+            provider=payload.provider or "",
+            external_sender_id=payload.external_sender_id,
+            lead_id=lead.id,
+        )
+    )
+    db.flush()
 
 
 def _match_lead(db: Session, email: str | None, phone: str | None) -> tuple[Lead | None, bool]:
@@ -84,41 +111,75 @@ def _build_content(payload: Any) -> str:
     return "\n\n".join(part for part in parts if part) or f"Inbound {payload.channel} event."
 
 
+def _resolve_lead(
+    db: Session, payload: Any, email: str | None, phone: str | None, name: str
+) -> tuple[Lead, bool]:
+    """Find or create the lead for an inbound event.
+
+    Priority: an existing external identity (channel + provider + sender ID)
+    wins; otherwise conservative email/phone matching; otherwise a new lead.
+    Conflicting identifiers never merge leads — they flag for review instead.
+    """
+    has_contact_identity = email is not None or phone is not None
+
+    identity_lead = _find_external_identity(db, payload)
+    if identity_lead is not None:
+        if has_contact_identity:
+            contact_match, ambiguous = _match_lead(db, email, phone)
+            if ambiguous or (contact_match is not None and contact_match.id != identity_lead.id):
+                # The provider identity and the contact details point at
+                # different records; keep the identity lead, do not merge,
+                # and flag the uncertainty for a human.
+                identity_lead.needs_review = True
+            else:
+                _fill_missing_identity(
+                    identity_lead, name=name, email=email, phone=phone, company=""
+                )
+        else:
+            _fill_missing_identity(identity_lead, name=name, email=None, phone=None, company="")
+        return identity_lead, False
+
+    lead, ambiguous = (None, False)
+    if has_contact_identity:
+        lead, ambiguous = _match_lead(db, email, phone)
+
+    if lead is not None:
+        _fill_missing_identity(lead, name=name, email=email, phone=phone, company="")
+        _attach_external_identity(db, payload, lead)
+        return lead, False
+
+    new_lead = Lead(
+        name=name,
+        email=email,
+        phone=phone,
+        status="new",
+        source=payload.channel,
+        needs_review=ambiguous or not has_contact_identity,
+    )
+    db.add(new_lead)
+    db.flush()
+    _attach_external_identity(db, payload, new_lead)
+    return new_lead, True
+
+
 def process_inbound_event(
     db: Session, payload: Any, idempotency_key: str, settings: Settings
 ) -> InboundResult:
     """Match or create the lead, record the inbound activity, and persist the
     idempotency row — all in one transaction. Retries with the same key replay
-    the stored result; a concurrent duplicate loses on the unique digest and
-    is replayed by the caller after rollback."""
+    the stored result. Unique-constraint losers (concurrent duplicate keys or
+    concurrent identity creation) roll back and re-process once."""
     digest = digest_token(idempotency_key, settings.session_token_pepper)
-    replay = _find_replay(db, digest)
-    if replay is not None:
-        return replay
+    for attempt in range(2):
+        replay = _find_replay(db, digest)
+        if replay is not None:
+            return replay
 
-    email = clean_optional_email(payload.sender_email)
-    phone = normalize_phone(payload.sender_phone)
-    name = (payload.sender_name or "").strip()
-    has_identity = email is not None or phone is not None
+        email = clean_optional_email(payload.sender_email)
+        phone = normalize_phone(payload.sender_phone)
+        name = (payload.sender_name or "").strip()
 
-    lead, ambiguous = (None, False)
-    if has_identity:
-        lead, ambiguous = _match_lead(db, email, phone)
-
-    lead_created = lead is None
-    if lead is None:
-        lead = Lead(
-            name=name,
-            email=email,
-            phone=phone,
-            status="new",
-            source=payload.channel,
-            needs_review=ambiguous or not has_identity,
-        )
-        db.add(lead)
-        db.flush()
-    else:
-        _fill_missing_identity(lead, name=name, email=email, phone=phone, company="")
+        lead, lead_created = _resolve_lead(db, payload, email, phone, name)
         if lead.archived_at is not None:
             # New inbound contact on an archived lead: bring it back and flag it.
             lead.archived_at = None
@@ -127,40 +188,46 @@ def process_inbound_event(
                 db, lead, "restored", "Lead restored automatically by a new inbound request."
             )
 
-    meta: dict[str, Any] = dict(payload.metadata or {})
-    for key in ("event_type", "external_sender_id"):
-        value = getattr(payload, key)
-        if value:
-            meta[key] = value
+        meta: dict[str, Any] = dict(payload.metadata or {})
+        for key in ("event_type", "external_sender_id"):
+            value = getattr(payload, key)
+            if value:
+                meta[key] = value
 
-    activity = add_activity(
-        db,
-        lead,
-        "inbound_request",
-        _build_content(payload),
-        channel=payload.channel,
-        direction="inbound",
-        provider=payload.provider,
-        external_event_id=payload.external_event_id,
-        occurred_at=payload.received_at,
-        meta=meta or None,
-    )
+        activity = add_activity(
+            db,
+            lead,
+            "inbound_request",
+            _build_content(payload),
+            channel=payload.channel,
+            direction="inbound",
+            provider=payload.provider,
+            external_event_id=payload.external_event_id,
+            occurred_at=payload.received_at,
+            meta=meta or None,
+        )
 
-    event = InboundEvent(
-        idempotency_key_digest=digest,
-        lead_id=lead.id,
-        activity_id=activity.id,
-        lead_created=lead_created,
-    )
-    db.add(event)
-    try:
-        db.commit()
-    except IntegrityError:
-        # A concurrent request with the same idempotency key committed first;
-        # everything from this attempt rolls back and we replay its result.
-        db.rollback()
-        replay = _find_replay(db, digest)
-        if replay is None:  # pragma: no cover - defensive
-            raise InboundConflictError("Concurrent duplicate could not be replayed") from None
-        return replay
-    return InboundResult(lead=lead, activity=activity, lead_created=lead_created, replayed=False)
+        db.add(
+            InboundEvent(
+                idempotency_key_digest=digest,
+                lead_id=lead.id,
+                activity_id=activity.id,
+                lead_created=lead_created,
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            # A concurrent request won a unique constraint (idempotency digest
+            # or external identity). Roll back and re-process: an idempotency
+            # duplicate replays, an identity race re-matches the new row.
+            db.rollback()
+            if attempt == 0:
+                continue
+            raise InboundConflictError("Concurrent inbound event could not be reconciled") from None
+        return InboundResult(
+            lead=lead, activity=activity, lead_created=lead_created, replayed=False
+        )
+    raise InboundConflictError(
+        "Concurrent inbound event could not be reconciled"
+    )  # pragma: no cover

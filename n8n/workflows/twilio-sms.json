@@ -1,0 +1,178 @@
+{
+  "name": "Twilio SMS Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "twilio-sms",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-twilio-sms-post",
+      "name": "Twilio SMS Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "twilio-sms-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Twilio webhook authenticity: HMAC-SHA1 over the public URL plus the\n// alphabetically sorted POST parameters, keyed with the auth token.\nfunction twilioSignatureValid(params, headers, path) {\n  const authToken = $env.TWILIO_AUTH_TOKEN || '';\n  const url = ($env.TWILIO_WEBHOOK_BASE_URL || '') + '/webhook/' + path;\n  const sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\n  const provided = headers['x-twilio-signature'] || '';\n  if (!authToken || !provided) return false;\n  const expected = crypto.createHmac('sha1', authToken).update(url + sorted, 'utf8').digest('base64');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(provided);\n  return a.length === b.length && crypto.timingSafeEqual(a, b);\n}\nconst crypto = require('crypto');\nconst item = $input.all()[0];\nconst params = item.json.body || {};\nconst headers = item.json.headers || {};\n\nif (!twilioSignatureValid(params, headers, 'twilio-sms')) {\n  return [{ json: { reject: true, status: 403, message: 'invalid signature' } }];\n}\nconst sid = params.MessageSid || params.SmsSid;\nif (!sid || !params.From) {\n  return [{ json: { reject: true, status: 422, message: 'missing MessageSid or From' } }];\n}\nreturn [{\n  json: {\n    reject: false,\n    idempotency_key: 'twilio:sms:' + sid,\n    event: {\n      channel: 'sms',\n      provider: 'twilio',\n      external_event_id: sid,\n      event_type: 'sms_received',\n      sender_phone: params.From,\n      content: params.Body || '(empty SMS)',\n      received_at: new Date().toISOString(),\n      metadata: {\n        to: params.To || null,\n        message_status: params.SmsStatus || params.MessageStatus || null,\n        from_city: params.FromCity || null,\n        from_state: params.FromState || null,\n      },\n    },\n  },\n}];\n"
+      },
+      "id": "code-normalize",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-reject?",
+      "name": "Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {}
+      },
+      "id": "crm-write",
+      "name": "CRM Write",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'ok', lead_id: $json.lead_id, activity_id: $json.activity_id, replayed: $json.replayed}) }}"
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-reject",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Twilio SMS Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Write": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

@@ -213,6 +213,30 @@ class LeadCustomValue(Base):
     field: Mapped[CustomFieldDefinition] = relationship()
 
 
+class LeadExternalIdentity(Base):
+    """Stable provider sender IDs (Facebook PSID, WhatsApp ID, …) mapped to a
+    lead, so provider-only channels reuse one lead instead of creating a new
+    one per message."""
+
+    __tablename__ = "lead_external_identities"
+    __table_args__ = (
+        UniqueConstraint(
+            "channel", "provider", "external_sender_id", name="uq_lead_external_identities"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    channel: Mapped[str] = mapped_column(String(20))
+    provider: Mapped[str] = mapped_column(String(100))
+    external_sender_id: Mapped[str] = mapped_column(String(255))
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+    lead: Mapped[Lead] = relationship()
+
+
 class InboundEvent(Base):
     """Idempotency ledger for the n8n inbound endpoint: one row per processed
     Idempotency-Key, storing only a keyed digest and the replayable result."""

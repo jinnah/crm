@@ -287,6 +287,8 @@ def restore_lead(db: Session, acting_user: User, lead: Lead) -> Lead:
 
 
 def add_note(db: Session, acting_user: User, lead: Lead, content: str) -> LeadActivity:
+    if lead.archived_at is not None:
+        raise LeadError("Archived leads must be restored before adding notes.", status_code=409)
     text = content.strip()
     if not text:
         raise LeadError("Note content is required.")

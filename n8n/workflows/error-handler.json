@@ -1,0 +1,47 @@
+{
+  "name": "Inbound Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Central failure summary: sanitized, never credentials or raw headers.\nconst item = $input.all()[0].json;\nconst execution = item.execution || {};\nconst failed = item.workflow || {};\nconst message = String((execution.error && execution.error.message) || 'unknown error').slice(0, 500);\nlet category = 'unknown';\nif (/401|403|invalid signature|api key|422|validation/i.test(message)) {\n  category = 'permanent_auth_or_validation';\n} else if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout|5\\d\\d|socket/i.test(message)) {\n  category = 'temporary_crm_or_network';\n}\nreturn [{\n  json: {\n    failed_workflow: failed.name || 'unknown',\n    execution_id: execution.id || null,\n    last_node: execution.lastNodeExecuted || 'unknown',\n    category,\n    message,\n    observed_at: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "code-summarize-failure",
+      "name": "Summarize Failure",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Summarize Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}

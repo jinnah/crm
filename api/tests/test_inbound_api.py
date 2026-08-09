@@ -205,3 +205,125 @@ def test_phone_without_country_code_is_not_guessed(client, db) -> None:
     response = post_event(client, payload, key="evt-phone-1").json()
     lead = db.get(Lead, uuid.UUID(response["lead_id"]))
     assert lead.phone == "5550109999"  # digits kept, no invented +1
+
+
+def test_body_limit_counts_actual_bytes() -> None:
+    import asyncio
+
+    import pytest as pytest_module
+    from fastapi import HTTPException
+
+    from app.api.v1.inbound import enforce_body_limit
+
+    class FakeRequest:
+        def __init__(self, chunks):
+            self._chunks = chunks
+            self.headers = {}
+
+        async def stream(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    # 70KB streamed without a Content-Length header must still be rejected.
+    big = FakeRequest([b"x" * 1024] * 70)
+    with pytest_module.raises(HTTPException) as error:
+        asyncio.run(enforce_body_limit(big))
+    assert error.value.status_code == 413
+
+    ok = FakeRequest([b"x" * 1024, b"y" * 10])
+    asyncio.run(enforce_body_limit(ok))
+    assert ok._body == b"x" * 1024 + b"y" * 10  # cached for the JSON parser
+
+
+def test_oversized_body_rejected_end_to_end(client) -> None:
+    payload = dict(WEB_FORM_EVENT, content="x" * (65 * 1024))
+    assert post_event(client, payload, key="evt-huge-1").status_code == 413
+
+
+def test_external_identity_reuses_lead_across_messages(client, db) -> None:
+    first = {
+        "channel": "facebook",
+        "provider": "meta",
+        "external_sender_id": "psid-repeat",
+        "sender_name": "FB Person",
+        "content": "first message",
+    }
+    second = dict(first, content="second message")
+    r1 = post_event(client, first, key="evt-fb-0001").json()
+    r2 = post_event(client, second, key="evt-fb-0002").json()
+
+    assert r1["lead_created"] is True
+    assert r2["lead_created"] is False
+    assert r2["lead_id"] == r1["lead_id"]
+    assert db.scalar(select(func.count()).select_from(Lead)) == 1
+    assert db.scalar(select(func.count()).select_from(LeadActivity)) == 2
+    lead = db.get(Lead, uuid.UUID(r1["lead_id"]))
+    assert lead.needs_review is True  # first provider-only contact is flagged
+
+
+def test_external_identity_fills_contact_details_later(client, db) -> None:
+    base = {"channel": "whatsapp", "provider": "meta", "external_sender_id": "wa-111"}
+    r1 = post_event(client, dict(base, content="hola"), key="evt-wa-0001").json()
+    lead = db.get(Lead, uuid.UUID(r1["lead_id"]))
+    assert lead.phone is None
+
+    r2 = post_event(
+        client,
+        dict(base, content="mi número", sender_phone="+15550106000", sender_name="WA Person"),
+        key="evt-wa-0002",
+    ).json()
+    assert r2["lead_id"] == r1["lead_id"]
+    db.expire_all()
+    assert lead.phone == "+15550106000"
+    assert lead.name == "WA Person"
+
+
+def test_identity_and_contact_conflict_flags_review_without_merging(client, db) -> None:
+    other = Lead(name="Existing Email Lead", email="conflict@example.com", source="manual")
+    db.add(other)
+    db.commit()
+
+    base = {"channel": "facebook", "provider": "meta", "external_sender_id": "psid-conflict"}
+    r1 = post_event(client, dict(base, content="hello"), key="evt-fbc-0001").json()
+    identity_lead_id = r1["lead_id"]
+    assert identity_lead_id != str(other.id)
+
+    # Same provider identity now claims an email owned by a different lead.
+    r2 = post_event(
+        client,
+        dict(base, content="mail me", sender_email="conflict@example.com"),
+        key="evt-fbc-0002",
+    ).json()
+    assert r2["lead_id"] == identity_lead_id  # no silent merge
+    identity_lead = db.get(Lead, uuid.UUID(identity_lead_id))
+    db.expire_all()
+    assert identity_lead.needs_review is True
+    assert identity_lead.email is None  # conflicting email was not copied
+    assert db.scalar(select(func.count()).select_from(Lead)) == 2
+
+
+def test_contact_match_attaches_identity_for_future_events(client, db) -> None:
+    existing = Lead(name="Known Person", phone="+15550107000", source="manual")
+    db.add(existing)
+    db.commit()
+
+    with_phone = {
+        "channel": "whatsapp",
+        "provider": "meta",
+        "external_sender_id": "wa-known",
+        "sender_phone": "+15550107000",
+        "content": "hi",
+    }
+    r1 = post_event(client, with_phone, key="evt-wak-0001").json()
+    assert r1["lead_id"] == str(existing.id)
+
+    # Later event carries only the provider identity; it must reuse the lead.
+    only_identity = {
+        "channel": "whatsapp",
+        "provider": "meta",
+        "external_sender_id": "wa-known",
+        "content": "again",
+    }
+    r2 = post_event(client, only_identity, key="evt-wak-0002").json()
+    assert r2["lead_id"] == str(existing.id)
+    assert r2["lead_created"] is False

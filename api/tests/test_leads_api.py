@@ -177,13 +177,10 @@ def test_notes_and_follow_up_lifecycle(client, make_user) -> None:
     assert note.status_code == 201
     assert note.json()["type"] == "note"
     assert note.json()["created_by_email"] == "owner@example.com"
-    assert (
-        client.post(
-            f"/api/v1/leads/{lead['id']}/notes", json={"content": "   "}, headers=headers
-        ).status_code
-        == 422
-        or True
-    )  # whitespace-only rejected by service (400) or schema
+    whitespace_note = client.post(
+        f"/api/v1/leads/{lead['id']}/notes", json={"content": "   "}, headers=headers
+    )
+    assert whitespace_note.status_code == 400  # whitespace-only content is rejected
 
     soon = (utcnow() + timedelta(days=1)).isoformat()
     later = (utcnow() + timedelta(days=3)).isoformat()
@@ -308,3 +305,20 @@ def test_no_hard_delete_route_for_leads(client, make_user, db) -> None:
     assert client.delete(f"/api/v1/leads/{lead['id']}", headers=headers).status_code == 405
     assert db.scalar(select(Lead)) is not None
     assert db.scalar(select(LeadActivity)) is not None
+
+
+def test_archived_lead_rejects_notes_until_restored(client, make_user) -> None:
+    headers = session_for(client, make_user, "owner@example.com", "owner")
+    lead = create_lead(client, headers).json()
+    client.post(f"/api/v1/leads/{lead['id']}/archive", headers=headers)
+
+    blocked = client.post(
+        f"/api/v1/leads/{lead['id']}/notes", json={"content": "should fail"}, headers=headers
+    )
+    assert blocked.status_code == 409
+
+    client.post(f"/api/v1/leads/{lead['id']}/restore", headers=headers)
+    allowed = client.post(
+        f"/api/v1/leads/{lead['id']}/notes", json={"content": "works again"}, headers=headers
+    )
+    assert allowed.status_code == 201

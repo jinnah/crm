@@ -39,13 +39,13 @@ Do not introduce: microservices, Kubernetes, message brokers, extra frontends, s
 
 ## Current phase
 
-**Core CRM milestone complete — awaiting lead-architect review.** Phases 0–1 approved (foundation; authentication and user access — Argon2id, opaque peppered sessions, CSRF, roles, forced password change, owner-only user management, CLI bootstrap/reset).
+**Inbound channel integrations milestone complete — awaiting lead-architect review.** Phases 0–1 and the core CRM milestone approved. This milestone adds: the n8n Compose service (pinned image, named volume, env-only secrets) with version-controlled workflows in `n8n/workflows/` for website forms, Twilio SMS and voice/missed-call/voicemail events, WhatsApp, and Facebook Messenger — each validating provider signatures (Twilio HMAC-SHA1, Meta X-Hub-Signature-256, form shared secret/honeypot), normalizing to the CRM inbound contract with deterministic provider-derived idempotency keys, calling `POST /api/v1/inbound/events` with bounded retries, plus a central error workflow. CRM side: `lead_external_identities` (unique channel+provider+sender ID → lead) so provider-only senders reuse one lead, with conflict flagging instead of merging; corrections: actual-byte inbound body limit, required custom fields cannot be cleared, archived leads reject notes. Workflow Code-node logic is executed directly by Vitest from the committed JSON.
 
 The CRM milestone adds: single `Lead` record (statuses new/contacted/qualified/won/lost; archive/restore, never hard-delete; E.164 phone when the country code is present — never guessed), role-scoped access (owners/managers see and manage everything; team members see only assigned leads and may change status, follow-ups, notes and custom values), activity timeline with automatic entries for status/assignment/follow-up/archive changes (inbound requests are immutable history), owner-managed custom fields (text/number/date/boolean/select; immutable keys; deactivation preserves data), attention queue (overdue and due-today follow-ups, new unassigned, needs-review), and the authenticated idempotent `POST /api/v1/inbound/events` endpoint for n8n (X-API-Key auth via INBOUND_API_KEY, required Idempotency-Key stored as keyed digest with a PostgreSQL unique constraint, conservative exact email/phone matching, ambiguous or identity-less events become needs_review leads).
 
 Phase 1 rules remain: no public registration, MFA/OAuth, JWTs or browser-storage auth, Redis, or background workers; generic errors; never store or log raw tokens or plaintext passwords.
 
-Deferred to later phases: actual n8n workflows and provider integrations (Twilio, WhatsApp, Facebook, Gmail/Outlook), embedded public web form, Sheets integration and import, two-way messaging, response-time tracking, production deployment automation.
+Deferred to later phases: real provider onboarding (Twilio numbers, Meta app review), outbound/two-way messaging, Gmail/Outlook, embedded public web form UI, Sheets integration and import, response-time tracking, media storage, lead merging, production deployment automation.
 
 ## Validation commands
 

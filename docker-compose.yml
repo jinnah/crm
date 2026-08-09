@@ -60,5 +60,40 @@ services:
       retries: 5
       start_period: 15s
 
+  n8n:
+    image: n8nio/n8n:1.64.0
+    environment:
+      # Placeholder only — generate a real key per installation.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-dev-only-n8n-encryption-key}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_SECURE_COOKIE: "false" # local HTTP development
+      GENERIC_TIMEZONE: ${GENERIC_TIMEZONE:-UTC}
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678}
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # Workflow configuration (all placeholders; never commit real values).
+      CRM_API_URL: http://api:8000
+      CRM_INBOUND_API_KEY: ${INBOUND_API_KEY:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_WEBHOOK_BASE_URL: ${TWILIO_WEBHOOK_BASE_URL:-http://localhost:5678}
+      META_APP_SECRET: ${META_APP_SECRET:-}
+      META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
+      FORM_SHARED_SECRET: ${FORM_SHARED_SECRET:-}
+    ports:
+      - "5678:5678"
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./n8n/workflows:/workflows:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5678/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
 volumes:
   postgres_data:
+  n8n_data:

@@ -1,0 +1,178 @@
+{
+  "name": "Website Form Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "web-form",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-web-form-post",
+      "name": "Form Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "web-form-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate and normalize a website-form submission into a CRM inbound event.\nconst item = $input.all()[0];\nconst body = item.json.body || {};\nconst headers = item.json.headers || {};\n\n// Lightweight abuse protection: optional shared secret plus a honeypot field.\nconst sharedSecret = $env.FORM_SHARED_SECRET || '';\nif (sharedSecret && headers['x-form-secret'] !== sharedSecret) {\n  return [{ json: { reject: true, status: 403, message: 'forbidden' } }];\n}\nif (body.website) {\n  // Honeypot filled: acknowledge quietly, never write to the CRM.\n  return [{ json: { reject: true, status: 200, message: 'accepted' } }];\n}\n\nconst submissionId = String(body.submission_id || '').trim();\nconst name = String(body.name || '').trim();\nconst email = String(body.email || '').trim();\nconst phone = String(body.phone || '').trim();\nconst message = String(body.message || '').trim();\nif (!submissionId || !message || (!email && !phone)) {\n  return [{ json: { reject: true, status: 422, message: 'submission_id, message and email or phone are required' } }];\n}\nif (message.length > 10000 || name.length > 200 || email.length > 320 || phone.length > 50) {\n  return [{ json: { reject: true, status: 413, message: 'payload too large' } }];\n}\n\nconst metadata = {};\nfor (const key of ['form', 'page', 'campaign', 'referrer']) {\n  if (body[key]) metadata[key] = String(body[key]).slice(0, 500);\n}\n\nreturn [{\n  json: {\n    reject: false,\n    idempotency_key: 'form:' + submissionId,\n    event: {\n      channel: 'web_form',\n      provider: 'website',\n      external_event_id: submissionId,\n      event_type: 'form_submission',\n      sender_name: name || null,\n      sender_email: email || null,\n      sender_phone: phone || null,\n      subject: body.subject ? String(body.subject).slice(0, 500) : null,\n      content: message,\n      received_at: body.submitted_at || new Date().toISOString(),\n      metadata,\n    },\n  },\n}];\n"
+      },
+      "id": "code-normalize",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-reject?",
+      "name": "Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {}
+      },
+      "id": "crm-write",
+      "name": "CRM Write",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'ok', lead_id: $json.lead_id, activity_id: $json.activity_id, replayed: $json.replayed}) }}"
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-reject",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Form Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Write": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "pinData": {}
+}
