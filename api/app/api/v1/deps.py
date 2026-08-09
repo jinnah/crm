@@ -90,5 +90,10 @@ def get_mailer(request: Request):
     return request.app.state.mailer
 
 
+def get_sms_sender(request: Request):
+    """Replaceable outbound-SMS transport; tests substitute a fake."""
+    return request.app.state.sms_sender
+
+
 def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"

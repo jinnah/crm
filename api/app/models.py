@@ -36,7 +36,14 @@ ACTIVITY_TYPES = (
     "follow_up_cleared",
     "archived",
     "restored",
+    "outbound_message",
+    "message_status",
+    "contacted_outside_crm",
 )
+
+# Outbound message purposes and delivery states.
+MESSAGE_PURPOSES = ("human_reply", "auto_acknowledgment", "staff_alert")
+MESSAGE_STATUSES = ("pending", "submitted", "delivered", "failed", "unknown")
 
 
 def utcnow() -> datetime:
@@ -140,6 +147,13 @@ class Lead(Base):
     last_contacted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
     needs_review: Mapped[bool] = mapped_column(default=False)
     archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # First-response tracking. The clock starts at the first inbound request;
+    # only human actions stop it.
+    first_inbound_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    response_due_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    first_response_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    first_response_seconds: Mapped[int | None] = mapped_column(Integer)
+    response_target_met: Mapped[bool | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
@@ -235,6 +249,80 @@ class LeadExternalIdentity(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
     lead: Mapped[Lead] = relationship()
+
+
+class CommunicationSettings(Base):
+    """Single-row operational messaging configuration (single-tenant install).
+
+    Twilio credentials never live here — they stay in environment variables /
+    n8n credential storage.
+    """
+
+    __tablename__ = "communication_settings"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    business_name: Mapped[str] = mapped_column(String(200), default="Our team")
+    form_title: Mapped[str] = mapped_column(String(200), default="Request a quote")
+    form_intro: Mapped[str] = mapped_column(Text, default="")
+    acknowledgment_enabled: Mapped[bool] = mapped_column(default=False)
+    acknowledgment_template: Mapped[str] = mapped_column(
+        Text,
+        default="Hi {{lead_name}}, thanks for contacting {{business_name}}. We'll reply shortly.",
+    )
+    alert_enabled: Mapped[bool] = mapped_column(default=False)
+    alert_template: Mapped[str] = mapped_column(
+        Text, default="New {{source}} lead: {{lead_name}} (CRM ref {{lead_id}})."
+    )
+    alert_destination_phone: Mapped[str | None] = mapped_column(String(32))
+    response_target_minutes: Mapped[int] = mapped_column(Integer, default=5)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class OutboundMessage(Base):
+    """Durable record of every outbound SMS: created before the provider is
+    contacted, never hard-deleted, deduplicated by idempotency key digest and
+    by provider message SID."""
+
+    __tablename__ = "outbound_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('human_reply', 'auto_acknowledgment', 'staff_alert')",
+            name="ck_outbound_messages_purpose",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'submitted', 'delivered', 'failed', 'unknown')",
+            name="ck_outbound_messages_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(24))
+    to_phone: Mapped[str] = mapped_column(String(32))
+    from_phone: Mapped[str | None] = mapped_column(String(32))
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    provider: Mapped[str] = mapped_column(String(32), default="twilio")
+    provider_sid: Mapped[str | None] = mapped_column(String(64), unique=True)
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    related_activity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("lead_activities.id", ondelete="SET NULL")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(32))
+    error_message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    author: Mapped[User | None] = relationship()
 
 
 class InboundEvent(Base):

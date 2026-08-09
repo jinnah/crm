@@ -207,32 +207,49 @@ def test_phone_without_country_code_is_not_guessed(client, db) -> None:
     assert lead.phone == "5550109999"  # digits kept, no invented +1
 
 
-def test_body_limit_counts_actual_bytes() -> None:
-    import asyncio
+def test_chunked_oversized_body_rejected_before_parsing(app, monkeypatch) -> None:
+    """A chunked body with no Content-Length must be cut off while streaming:
+    the endpoint and the JSON parser must never run."""
+    import anyio
+    import httpx
 
-    import pytest as pytest_module
-    from fastapi import HTTPException
+    from app.api.v1 import inbound as inbound_module
 
-    from app.api.v1.inbound import enforce_body_limit
+    executed = []
+    original = inbound_module.process_inbound_event
+    monkeypatch.setattr(
+        inbound_module,
+        "process_inbound_event",
+        lambda *args, **kwargs: executed.append(1) or original(*args, **kwargs),
+    )
 
-    class FakeRequest:
-        def __init__(self, chunks):
-            self._chunks = chunks
-            self.headers = {}
+    chunks_sent = []
 
-        async def stream(self):
-            for chunk in self._chunks:
-                yield chunk
+    async def oversized_chunks():
+        # 100 x 1KB chunks, streamed without Content-Length.
+        for index in range(100):
+            chunks_sent.append(index)
+            yield b"x" * 1024
 
-    # 70KB streamed without a Content-Length header must still be rejected.
-    big = FakeRequest([b"x" * 1024] * 70)
-    with pytest_module.raises(HTTPException) as error:
-        asyncio.run(enforce_body_limit(big))
-    assert error.value.status_code == 413
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post(
+                "/api/v1/inbound/events",
+                content=oversized_chunks(),
+                headers={
+                    "X-API-Key": TEST_INBOUND_KEY,
+                    "Idempotency-Key": "evt-chunked-1",
+                    "Content-Type": "application/json",
+                },
+            )
 
-    ok = FakeRequest([b"x" * 1024, b"y" * 10])
-    asyncio.run(enforce_body_limit(ok))
-    assert ok._body == b"x" * 1024 + b"y" * 10  # cached for the JSON parser
+    response = anyio.run(run)
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body too large."}
+    assert executed == []  # endpoint never ran
+    # Rejected mid-stream, not after buffering everything.
+    assert len(chunks_sent) < 100
 
 
 def test_oversized_body_rejected_end_to_end(client) -> None:

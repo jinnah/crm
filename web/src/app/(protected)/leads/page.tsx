@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
 import { LeadBadges, sourceLabel, statusLabel } from "@/components/lead-badges";
+import { ResponseBadge } from "@/components/response-badge";
 import {
   api,
   errorDetail,
@@ -224,7 +225,7 @@ export default function LeadsPage() {
                 <tr key={lead.id}>
                   <td>
                     <Link href={`/leads/${lead.id}`}>{lead.name || "Unnamed lead"}</Link>{" "}
-                    <LeadBadges lead={lead} />
+                    <LeadBadges lead={lead} /> <ResponseBadge lead={lead} />
                   </td>
                   <td>
                     {lead.email ?? "—"}

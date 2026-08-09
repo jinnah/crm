@@ -1,11 +1,18 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.v1.deps import DbDep, FullyAuthedUserDep, check_csrf, check_origin
+from app.api.v1.deps import (
+    DbDep,
+    FullyAuthedUserDep,
+    SettingsDep,
+    check_csrf,
+    check_origin,
+    get_sms_sender,
+)
 from app.api.v1.schemas import (
     ActivityOut,
     AssignableUserOut,
@@ -15,11 +22,14 @@ from app.api.v1.schemas import (
     LeadListOut,
     LeadOut,
     NoteRequest,
+    OutboundMessageOut,
+    SendMessageRequest,
     UpdateLeadRequest,
 )
-from app.models import Lead, LeadActivity, User
+from app.models import Lead, LeadActivity, OutboundMessage, User, utcnow
 from app.services import custom_fields as custom_field_service
 from app.services import leads as lead_service
+from app.services import messaging
 from app.services.leads import LeadError
 
 router = APIRouter(
@@ -54,6 +64,16 @@ def serialize_lead(db: Session, lead: Lead, values: dict | None = None) -> LeadO
         last_contacted_at=lead.last_contacted_at,
         needs_review=lead.needs_review,
         archived_at=lead.archived_at,
+        first_inbound_at=lead.first_inbound_at,
+        response_due_at=lead.response_due_at,
+        first_response_at=lead.first_response_at,
+        first_response_seconds=lead.first_response_seconds,
+        response_target_met=lead.response_target_met,
+        response_overdue=(
+            lead.first_response_at is None
+            and lead.response_due_at is not None
+            and lead.response_due_at < utcnow()
+        ),
         created_at=lead.created_at,
         updated_at=lead.updated_at,
         custom_values=values,
@@ -105,6 +125,7 @@ def attention_queue(user: FullyAuthedUserDep, db: DbDep) -> AttentionQueueOut:
         due_today=_serialize_many(db, groups["due_today"]),
         unassigned=_serialize_many(db, groups["unassigned"]),
         needs_review=_serialize_many(db, groups["needs_review"]),
+        unresponded=_serialize_many(db, groups["unresponded"]),
     )
 
 
@@ -258,4 +279,76 @@ def _serialize_activity(activity: LeadActivity) -> ActivityOut:
         occurred_at=activity.occurred_at,
         meta=activity.meta,
         created_at=activity.created_at,
+    )
+
+
+@router.get("/{lead_id}/messages", response_model=list[OutboundMessageOut])
+def list_messages(
+    lead_id: uuid.UUID, user: FullyAuthedUserDep, db: DbDep
+) -> list[OutboundMessageOut]:
+    try:
+        lead = lead_service.get_visible_lead(db, user, lead_id)
+    except LeadError as error:
+        raise _http(error) from error
+    rows = db.scalars(
+        select(OutboundMessage)
+        .where(OutboundMessage.lead_id == lead.id)
+        .order_by(OutboundMessage.created_at)
+    )
+    return [_serialize_message(db, row) for row in rows]
+
+
+@router.post("/{lead_id}/messages", response_model=OutboundMessageOut, status_code=201)
+def send_message(
+    lead_id: uuid.UUID,
+    body: SendMessageRequest,
+    request: Request,
+    user: FullyAuthedUserDep,
+    db: DbDep,
+    settings: SettingsDep,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=200)],
+) -> OutboundMessageOut:
+    try:
+        lead = lead_service.get_visible_lead(db, user, lead_id)
+        message = messaging.send_lead_sms(
+            db, user, lead, body.body, idempotency_key, settings, get_sms_sender(request)
+        )
+    except LeadError as error:
+        db.rollback()
+        raise _http(error) from error
+    return _serialize_message(db, message)
+
+
+@router.post("/{lead_id}/mark-contacted", response_model=LeadOut)
+def mark_contacted(lead_id: uuid.UUID, user: FullyAuthedUserDep, db: DbDep) -> LeadOut:
+    """Deliberate record of a response that happened off-platform."""
+    try:
+        lead = lead_service.get_visible_lead(db, user, lead_id)
+        messaging.mark_contacted_outside_crm(db, user, lead)
+    except LeadError as error:
+        db.rollback()
+        raise _http(error) from error
+    db.commit()
+    return serialize_lead(db, lead)
+
+
+def _serialize_message(db: Session, message: OutboundMessage) -> OutboundMessageOut:
+    author_email = None
+    if message.created_by is not None:
+        author = db.get(User, message.created_by)
+        author_email = author.email if author is not None else None
+    return OutboundMessageOut(
+        id=message.id,
+        lead_id=message.lead_id,
+        purpose=message.purpose,
+        to_phone=message.to_phone,
+        body=message.body,
+        status=message.status,
+        provider_sid=message.provider_sid,
+        error_message=message.error_message,
+        created_by_email=author_email,
+        created_at=message.created_at,
+        submitted_at=message.submitted_at,
+        delivered_at=message.delivered_at,
+        failed_at=message.failed_at,
     )

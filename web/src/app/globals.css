@@ -382,3 +382,115 @@ button:disabled {
   font-size: 0.9rem;
   opacity: 0.85;
 }
+
+/* Public request form */
+
+.public-form {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.public-card {
+  width: 100%;
+  max-width: 34rem;
+  padding: 1.5rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  border-radius: 8px;
+}
+
+.public-card h1 {
+  margin-bottom: 0.75rem;
+}
+
+.honeypot {
+  position: absolute;
+  left: -9999px;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+}
+
+/* SMS conversation */
+
+.sms-panel {
+  margin-top: 1rem;
+}
+
+.sms-thread {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  max-height: 24rem;
+  overflow-y: auto;
+  padding: 0.5rem 0;
+}
+
+.sms-message {
+  max-width: 85%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+}
+
+.sms-inbound {
+  align-self: flex-start;
+}
+
+.sms-outbound {
+  align-self: flex-end;
+  background: color-mix(in srgb, var(--foreground) 8%, transparent);
+}
+
+.sms-meta {
+  font-size: 0.78rem;
+  opacity: 0.8;
+  margin-top: 0.25rem;
+}
+
+.sms-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.sms-status-failed {
+  color: #b3261e;
+  font-weight: 600;
+}
+
+.sms-status-unknown {
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .sms-status-failed {
+    color: #ff8a80;
+  }
+}
+
+.response-badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  font-size: 0.75rem;
+}
+
+.response-late {
+  border-color: #b3261e;
+  color: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .response-late {
+    border-color: #ff8a80;
+    color: #ff8a80;
+  }
+}
+
+.char-count {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}

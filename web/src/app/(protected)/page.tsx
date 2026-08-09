@@ -4,10 +4,12 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/components/auth-context";
 import { LeadBadges } from "@/components/lead-badges";
+import { ResponseBadge } from "@/components/response-badge";
 import { api, errorDetail, type AttentionQueue, type Lead } from "@/lib/api";
 import { formatDateTime } from "@/lib/datetime";
 
 const SECTIONS: Array<{ key: keyof AttentionQueue; title: string }> = [
+  { key: "unresponded", title: "Response overdue" },
   { key: "overdue", title: "Overdue follow-ups" },
   { key: "due_today", title: "Follow-ups due today" },
   { key: "unassigned", title: "New unassigned leads" },
@@ -84,7 +86,7 @@ function AttentionRow({ lead }: { lead: Lead }) {
   return (
     <li>
       <Link href={`/leads/${lead.id}`}>{lead.name || lead.email || lead.phone || "Unnamed lead"}</Link>{" "}
-      <LeadBadges lead={lead} />
+      <LeadBadges lead={lead} /> <ResponseBadge lead={lead} />
       {lead.next_follow_up_at !== null && (
         <span className="attention-when"> · follow-up {formatDateTime(lead.next_follow_up_at)}</span>
       )}

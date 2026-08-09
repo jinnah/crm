@@ -26,6 +26,12 @@ const LEAD = {
   last_contacted_at: null,
   needs_review: false,
   archived_at: null,
+  first_inbound_at: null,
+  response_due_at: null,
+  first_response_at: null,
+  first_response_seconds: null,
+  response_target_met: null,
+  response_overdue: false,
   created_at: "2026-07-01T12:00:00Z",
   updated_at: "2026-07-01T12:00:00Z",
   custom_values: {},
@@ -49,6 +55,7 @@ test("shows attention groups with leads", async () => {
     due_today: [],
     unassigned: [{ ...LEAD, id: "bbbbbbbb-0000-0000-0000-000000000002", name: "Fresh Lead" }],
     needs_review: [],
+    unresponded: [],
   });
   expect(await screen.findByRole("heading", { name: "Overdue follow-ups" })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Overdue Lead" })).toHaveAttribute(
@@ -62,6 +69,6 @@ test("shows attention groups with leads", async () => {
 });
 
 test("shows the empty state when nothing needs attention", async () => {
-  renderHome({ overdue: [], due_today: [], unassigned: [], needs_review: [] });
+  renderHome({ overdue: [], due_today: [], unassigned: [], needs_review: [], unresponded: [] });
   expect(await screen.findByText("Nothing needs attention right now.")).toBeInTheDocument();
 });

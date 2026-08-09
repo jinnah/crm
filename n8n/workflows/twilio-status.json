@@ -1,0 +1,187 @@
+{
+  "name": "Twilio Delivery Status",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "twilio-status",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-twilio-status-post",
+      "name": "Status Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "twilio-status-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Twilio webhook authenticity: HMAC-SHA1 over the public URL plus the\n// alphabetically sorted POST parameters, keyed with the auth token.\nfunction twilioSignatureValid(params, headers, path) {\n  const authToken = $env.TWILIO_AUTH_TOKEN || '';\n  const url = ($env.TWILIO_WEBHOOK_BASE_URL || '') + '/webhook/' + path;\n  const sorted = Object.keys(params).sort().map((k) => k + params[k]).join('');\n  const provided = headers['x-twilio-signature'] || '';\n  if (!authToken || !provided) return false;\n  const expected = crypto.createHmac('sha1', authToken).update(url + sorted, 'utf8').digest('base64');\n  const a = Buffer.from(expected);\n  const b = Buffer.from(provided);\n  return a.length === b.length && crypto.timingSafeEqual(a, b);\n}\nconst crypto = require('crypto');\nconst item = $input.all()[0];\nconst params = item.json.body || {};\nconst headers = item.json.headers || {};\n\nif (!twilioSignatureValid(params, headers, 'twilio-status')) {\n  return [{ json: { reject: true, status: 403, message: 'invalid signature' } }];\n}\nconst sid = params.MessageSid || params.SmsSid;\nconst status = params.MessageStatus || params.SmsStatus;\nif (!sid || !status) {\n  return [{ json: { reject: true, status: 422, message: 'missing MessageSid or MessageStatus' } }];\n}\nreturn [{\n  json: {\n    reject: false,\n    payload: {\n      provider_sid: sid,\n      status,\n      error_code: params.ErrorCode ? String(params.ErrorCode).slice(0, 32) : null,\n      error_message: params.ErrorMessage ? String(params.ErrorMessage).slice(0, 300) : null,\n    },\n  },\n}];\n"
+      },
+      "id": "code-normalize",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-reject?",
+      "name": "Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/message-status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "crm-status-write",
+      "name": "CRM Status Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'ok'}) }}",
+        "options": {}
+      },
+      "id": "respond-status",
+      "name": "Respond Status OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-reject",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Status Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Status Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Status Update": {
+      "main": [
+        [
+          {
+            "node": "Respond Status OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "active": false,
+  "pinData": {}
+}

@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     # the endpoint (all requests rejected). Never exposed to the browser.
     inbound_api_key: str = ""
 
+    # Outbound SMS: the CRM calls this authenticated n8n workflow, which holds
+    # the Twilio credentials. No provider secrets are stored in PostgreSQL.
+    n8n_send_url: str = ""
+    n8n_send_secret: str = ""
+    twilio_from_number: str = ""
+
     # Transactional SMTP for password-recovery email (not the future CRM email integration).
     smtp_host: str = ""
     smtp_port: int = 587

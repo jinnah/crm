@@ -1,0 +1,227 @@
+{
+  "name": "Twilio Send",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "twilio-send",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-twilio-send-post",
+      "name": "Send Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "twilio-send-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Authenticated internal endpoint: only the CRM may call it, using a shared\n// secret held server-side. Twilio credentials stay in n8n env/credentials.\nconst crypto = require('crypto');\nconst item = $input.all()[0];\nconst body = item.json.body || {};\nconst headers = item.json.headers || {};\n\nconst expected = $env.CRM_SEND_SECRET || '';\nconst provided = headers['x-send-secret'] || '';\nif (!expected || !provided || provided.length !== expected.length ||\n    !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {\n  return [{ json: { reject: true, status: 401, message: 'unauthorized' } }];\n}\n\nconst to = String(body.to || '').trim();\nconst text = String(body.body || '').trim();\nif (!to.startsWith('+') || !text) {\n  return [{ json: { reject: true, status: 422, message: 'to (E.164) and body are required' } }];\n}\nconst accountSid = $env.TWILIO_ACCOUNT_SID || '';\nconst authToken = $env.TWILIO_AUTH_TOKEN || '';\nif (!accountSid || !authToken) {\n  return [{ json: { reject: true, status: 503, message: 'messaging not configured' } }];\n}\n// Credentials come from the environment and are never stored in this export.\nconst authHeader = 'Basic ' + Buffer.from(accountSid + ':' + authToken).toString('base64');\n\nreturn [{\n  json: {\n    reject: false,\n    message_id: String(body.message_id || ''),\n    to,\n    body: text,\n    from: $env.TWILIO_FROM_NUMBER || '',\n    account_sid: accountSid,\n    auth_header: authHeader,\n    status_callback: ($env.TWILIO_WEBHOOK_BASE_URL || '') + '/webhook/twilio-status',\n  },\n}];\n"
+      },
+      "id": "code-authorize-and-prepare",
+      "name": "Authorize And Prepare",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-reject?",
+      "name": "Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TWILIO_API_BASE || 'https://api.twilio.com' }}/2010-04-01/Accounts/{{ $json.account_sid }}/Messages.json",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.auth_header }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "To",
+              "value": "={{ $json.to }}"
+            },
+            {
+              "name": "From",
+              "value": "={{ $json.from }}"
+            },
+            {
+              "name": "Body",
+              "value": "={{ $json.body }}"
+            },
+            {
+              "name": "StatusCallback",
+              "value": "={{ $json.status_callback }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 15000
+        }
+      },
+      "id": "twilio-send",
+      "name": "Twilio Send",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Translate the Twilio response into the CRM's send outcome. Nothing from the\n// provider credentials is echoed; error text is bounded.\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\nconst body = response.body || {};\nif (status >= 200 && status < 300 && body.sid) {\n  return [{ json: { status: 'submitted', sid: body.sid, provider_status: body.status || null } }];\n}\nreturn [{\n  json: {\n    status: 'failed',\n    error_code: String(body.code || status || 'unknown').slice(0, 32),\n    error_message: String(body.message || 'Provider rejected the message.').slice(0, 300),\n  },\n}];\n"
+      },
+      "id": "code-classify-send",
+      "name": "Classify Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {}
+      },
+      "id": "respond-send",
+      "name": "Respond Send Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-reject",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        660,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Send Webhook": {
+      "main": [
+        [
+          {
+            "node": "Authorize And Prepare",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Authorize And Prepare": {
+      "main": [
+        [
+          {
+            "node": "Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Twilio Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twilio Send": {
+      "main": [
+        [
+          {
+            "node": "Classify Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Send": {
+      "main": [
+        [
+          {
+            "node": "Respond Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "active": false,
+  "pinData": {}
+}

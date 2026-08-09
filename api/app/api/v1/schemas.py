@@ -86,6 +86,12 @@ class LeadOut(BaseModel):
     last_contacted_at: datetime | None
     needs_review: bool
     archived_at: datetime | None
+    first_inbound_at: datetime | None = None
+    response_due_at: datetime | None = None
+    first_response_at: datetime | None = None
+    first_response_seconds: int | None = None
+    response_target_met: bool | None = None
+    response_overdue: bool = False
     created_at: datetime
     updated_at: datetime
     custom_values: dict[str, Any] = {}
@@ -149,6 +155,7 @@ class AttentionQueueOut(BaseModel):
     due_today: list[LeadOut]
     unassigned: list[LeadOut]
     needs_review: list[LeadOut]
+    unresponded: list[LeadOut] = []
 
 
 class CustomFieldOut(BaseModel):
@@ -211,3 +218,71 @@ class InboundEventResponse(BaseModel):
     activity_id: uuid.UUID
     lead_created: bool
     replayed: bool
+
+
+class MessageStatusRequest(BaseModel):
+    provider_sid: str = Field(min_length=4, max_length=64)
+    status: str = Field(max_length=32)
+    error_code: str | None = Field(default=None, max_length=32)
+    error_message: str | None = Field(default=None, max_length=500)
+
+
+class MessageStatusResponse(BaseModel):
+    matched: bool
+    status: str | None
+
+
+class OutboundMessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    lead_id: uuid.UUID
+    purpose: str
+    to_phone: str
+    body: str
+    status: str
+    provider_sid: str | None
+    error_message: str | None
+    created_by_email: str | None = None
+    created_at: datetime
+    submitted_at: datetime | None
+    delivered_at: datetime | None
+    failed_at: datetime | None
+
+
+class SendMessageRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=1600)
+
+
+class CommunicationSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    business_name: str
+    form_title: str
+    form_intro: str
+    acknowledgment_enabled: bool
+    acknowledgment_template: str
+    alert_enabled: bool
+    alert_template: str
+    alert_destination_phone: str | None
+    response_target_minutes: int
+
+
+class UpdateCommunicationSettingsRequest(BaseModel):
+    business_name: str | None = Field(default=None, max_length=200)
+    form_title: str | None = Field(default=None, max_length=200)
+    form_intro: str | None = Field(default=None, max_length=2000)
+    acknowledgment_enabled: bool | None = None
+    acknowledgment_template: str | None = Field(default=None, max_length=1600)
+    alert_enabled: bool | None = None
+    alert_template: str | None = Field(default=None, max_length=1600)
+    alert_destination_phone: str | None = Field(default=None, max_length=50)
+    response_target_minutes: int | None = Field(default=None, ge=1, le=10_080)
+
+
+class PublicFormInfoOut(BaseModel):
+    """Safe, public-facing subset of the settings for the request form."""
+
+    form_title: str
+    form_intro: str
+    business_name: str

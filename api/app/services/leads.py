@@ -361,6 +361,12 @@ def attention_queue(db: Session, user: User) -> dict[str, list[Lead]]:
         ).unique()
     )
     needs_review = list(db.scalars(base.where(Lead.needs_review.is_(True))).unique())
+    # Leads whose first-response deadline has passed with no human response.
+    unresponded = list(
+        db.scalars(
+            base.where(Lead.first_response_at.is_(None), Lead.response_due_at < now)
+        ).unique()
+    )
     unassigned: list[Lead] = []
     if can_manage_leads(user):
         unassigned = list(
@@ -371,6 +377,7 @@ def attention_queue(db: Session, user: User) -> dict[str, list[Lead]]:
         "due_today": due_today,
         "unassigned": unassigned,
         "needs_review": needs_review,
+        "unresponded": unresponded,
     }
 
 

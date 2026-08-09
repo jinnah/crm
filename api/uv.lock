@@ -217,6 +217,7 @@ dependencies = [
     { name = "alembic" },
     { name = "argon2-cffi" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic", extra = ["email"] },
     { name = "pydantic-settings" },
@@ -226,6 +227,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "anyio" },
     { name = "httpx" },
     { name = "pytest" },
     { name = "ruff" },
@@ -236,6 +238,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.19.1" },
     { name = "argon2-cffi", specifier = ">=25.1.0" },
     { name = "fastapi", specifier = ">=0.141.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.3.4" },
     { name = "pydantic", extras = ["email"], specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.15.0" },
@@ -245,6 +248,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "anyio", specifier = ">=4.14.2" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "ruff", specifier = ">=0.16.2" },

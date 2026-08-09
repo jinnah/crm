@@ -19,17 +19,22 @@ const ENV = {
   META_APP_SECRET: "test-meta-app-secret-not-real",
   META_VERIFY_TOKEN: "test-meta-verify-token",
   FORM_SHARED_SECRET: "",
+  CRM_SEND_SECRET: "test-crm-send-secret-not-real",
+  TWILIO_ACCOUNT_SID: "ACfake00000000000000000000000000",
+  TWILIO_FROM_NUMBER: "+15550209999",
 };
 
 type Item = { json: Record<string, unknown>; binary?: Record<string, unknown> };
 type Workflow = {
   name: string;
+  settings?: Record<string, unknown>;
   nodes: Array<{
     name: string;
     type: string;
     parameters: Record<string, unknown>;
     retryOnFail?: boolean;
     maxTries?: number;
+    onError?: string;
   }>;
 };
 
@@ -396,7 +401,9 @@ describe("workflow hygiene", () => {
       "error-handler.json",
       "meta-messenger.json",
       "meta-whatsapp.json",
+      "twilio-send.json",
       "twilio-sms.json",
+      "twilio-status.json",
       "twilio-voice.json",
       "website-form-intake.json",
     ]);
@@ -419,14 +426,259 @@ describe("workflow hygiene", () => {
       for (const node of workflow.nodes) {
         expect(node.type, `${file}:${node.name}`).not.toMatch(/postgres|mysql|database/i);
       }
-      if (file === "error-handler.json") continue;
       const crm = workflow.nodes.find((node) => node.name === "CRM Write");
-      expect(crm, file).toBeDefined();
-      expect(crm!.parameters.url).toBe("={{ $env.CRM_API_URL }}/api/v1/inbound/events");
-      expect(crm!.retryOnFail).toBe(true);
-      expect(crm!.maxTries).toBeLessThanOrEqual(5); // bounded, never indefinite
-      const headers = JSON.stringify(crm!.parameters.headerParameters);
-      expect(headers).toContain("$env.CRM_INBOUND_API_KEY"); // key from env, not embedded
+      if (!crm) continue;
+      expect(crm.parameters.url).toBe("={{ $env.CRM_API_URL }}/api/v1/inbound/events");
+      const headers = JSON.stringify(crm.parameters.headerParameters);
+      expect(headers).toContain("$env.CRM_INBOUND_API_KEY"); // key from env, never embedded
+      // No blanket retry: the classifier decides what may be retried.
+      expect(crm.retryOnFail ?? false).toBe(false);
     }
+  });
+
+  test("channel workflows retain no payloads on successful executions", () => {
+    for (const file of files) {
+      if (file === "error-handler.json") continue;
+      const workflow = loadWorkflow(file);
+      expect(workflow.settings?.saveDataSuccessExecution, file).toBe("none");
+    }
+  });
+
+  test("outbound send workflow keeps Twilio credentials out of the export", () => {
+    const workflow = loadWorkflow("twilio-send.json");
+    const send = workflow.nodes.find((node) => node.name === "Twilio Send");
+    expect(send).toBeDefined();
+    // Auth is a runtime-computed header from env, never a stored credential.
+    expect(JSON.stringify(send!.parameters.headerParameters)).toContain("$json.auth_header");
+    const serialized = JSON.stringify(workflow);
+    expect(serialized).toContain("$env.TWILIO_ACCOUNT_SID");
+    expect(serialized).toContain("$env.TWILIO_AUTH_TOKEN");
+    expect(serialized).not.toMatch(/AC[0-9a-f]{32}/);
+    expect(serialized).not.toMatch(/"credentials"/);
+  });
+});
+
+describe("selective CRM retry", () => {
+  const workflow = loadWorkflow("website-form-intake.json");
+
+  function classify(statusCode: number, body: unknown = {}) {
+    const prepared = {
+      json: { event: { channel: "web_form" }, idempotency_key: "form:sub-1" },
+    };
+    const node = workflow.nodes.find((candidate) => candidate.name === "Classify Response")!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function(
+      "$input",
+      "$env",
+      "$",
+      "require",
+      "Buffer",
+      String(node.parameters.jsCode),
+    );
+    return fn(
+      { all: () => [{ json: { statusCode, body } }] },
+      ENV,
+      (name: string) => {
+        if (name !== "Prepare Attempt") throw new Error(`unexpected node ${name}`);
+        return { first: () => prepared };
+      },
+      nodeRequire,
+      Buffer,
+    ) as Array<{ json: Record<string, unknown> }>;
+  }
+
+  test("2xx succeeds and carries the CRM ids", () => {
+    const [result] = classify(200, {
+      lead_id: "lead-1",
+      activity_id: "activity-1",
+      replayed: false,
+    });
+    expect(result.json).toMatchObject({
+      outcome: "success",
+      lead_id: "lead-1",
+      activity_id: "activity-1",
+    });
+  });
+
+  test("permanent failures are never retried", () => {
+    for (const status of [400, 401, 403, 404, 413, 422]) {
+      const [result] = classify(status);
+      expect(result.json.outcome, `status ${status}`).toBe("permanent");
+    }
+  });
+
+  test("temporary failures are routed to the bounded retry node", () => {
+    for (const status of [0, 429, 500, 502, 503, 504]) {
+      const [result] = classify(status);
+      expect(result.json.outcome, `status ${status}`).toBe("retry");
+    }
+  });
+
+  test("classifier output carries no personal data", () => {
+    const [result] = classify(500);
+    expect(JSON.stringify(result.json)).not.toMatch(/@example|[+]1555/);
+  });
+
+  test("every HTTP node continues on error so a Respond node always runs", () => {
+    // Without this, a CRM/provider outage aborts the execution and n8n
+    // answers an empty 200 — the caller would think it was accepted.
+    for (const file of fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".json"))) {
+      const wf = loadWorkflow(file);
+      for (const node of wf.nodes) {
+        if (node.type !== "n8n-nodes-base.httpRequest") continue;
+        expect(node.onError, `${file}:${node.name}`).toBe("continueRegularOutput");
+      }
+    }
+  });
+
+  test("retries run synchronously so the webhook answers after the outcome", () => {
+    for (const file of fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".json"))) {
+      const wf = loadWorkflow(file);
+      // A Wait node would end the execution and answer the provider early.
+      expect(wf.nodes.every((node) => node.type !== "n8n-nodes-base.wait"), file).toBe(true);
+      const retry = wf.nodes.find((node) => node.name === "CRM Write Retry");
+      if (!retry) continue;
+      expect(retry.retryOnFail).toBe(true);
+      expect(retry.maxTries).toBeLessThanOrEqual(4);
+    }
+  });
+
+  test("the retry classifier reports success or exhaustion", () => {
+    const [ok] = runCodeNode(workflow, "Classify Retry", [
+      { json: { statusCode: 200, body: { lead_id: "lead-9", activity_id: "act-9" } } },
+    ]);
+    expect(ok.json).toMatchObject({ outcome: "success", lead_id: "lead-9" });
+    const [dead] = runCodeNode(workflow, "Classify Retry", [{ json: { error: "ECONNREFUSED" } }]);
+    expect(dead.json).toMatchObject({ outcome: "exhausted", status: 503 });
+  });
+});
+
+describe("twilio send workflow", () => {
+  const workflow = loadWorkflow("twilio-send.json");
+
+  function prepare(body: Record<string, unknown>, secret = ENV.CRM_SEND_SECRET) {
+    return runCodeNode(workflow, "Authorize And Prepare", [
+      { json: { headers: { "x-send-secret": secret }, body } },
+    ]);
+  }
+
+  test("rejects an unauthorized caller", () => {
+    const [result] = prepare({ to: "+15550100001", body: "hi" }, "wrong-secret-value-here");
+    expect(result.json).toMatchObject({ reject: true, status: 401 });
+  });
+
+  test("requires an E.164 destination and a body", () => {
+    expect(prepare({ to: "5550100001", body: "hi" })[0].json).toMatchObject({
+      reject: true,
+      status: 422,
+    });
+    expect(prepare({ to: "+15550100001", body: "  " })[0].json).toMatchObject({
+      reject: true,
+      status: 422,
+    });
+  });
+
+  test("prepares a Twilio send with env-held account details", () => {
+    const [result] = prepare({
+      message_id: "msg-1",
+      to: "+15550100001",
+      body: "On our way",
+    });
+    expect(result.json).toMatchObject({
+      reject: false,
+      to: "+15550100001",
+      body: "On our way",
+      from: ENV.TWILIO_FROM_NUMBER,
+      account_sid: ENV.TWILIO_ACCOUNT_SID,
+    });
+    expect(String(result.json.status_callback)).toContain("/webhook/twilio-status");
+    // Basic auth is derived from env at runtime, never stored.
+    const expected =
+      "Basic " +
+      Buffer.from(`${ENV.TWILIO_ACCOUNT_SID}:${ENV.TWILIO_AUTH_TOKEN}`).toString("base64");
+    expect(result.json.auth_header).toBe(expected);
+  });
+
+  test("refuses to send when messaging credentials are unset", () => {
+    const workflowEnv = { ...ENV, TWILIO_ACCOUNT_SID: "", TWILIO_AUTH_TOKEN: "" };
+    const [result] = runCodeNode(
+      workflow,
+      "Authorize And Prepare",
+      [
+        {
+          json: {
+            headers: { "x-send-secret": ENV.CRM_SEND_SECRET },
+            body: { to: "+15550100001", body: "hi" },
+          },
+        },
+      ],
+      workflowEnv,
+    );
+    expect(result.json).toMatchObject({ reject: true, status: 503 });
+  });
+
+  test("classifies provider success and failure", () => {
+    const [ok] = runCodeNode(workflow, "Classify Send", [
+      { json: { statusCode: 201, body: { sid: "SMfake001", status: "queued" } } },
+    ]);
+    expect(ok.json).toMatchObject({ status: "submitted", sid: "SMfake001" });
+
+    const [failed] = runCodeNode(workflow, "Classify Send", [
+      { json: { statusCode: 400, body: { code: 21610, message: "Unsubscribed recipient" } } },
+    ]);
+    expect(failed.json).toMatchObject({
+      status: "failed",
+      error_code: "21610",
+      error_message: "Unsubscribed recipient",
+    });
+  });
+});
+
+describe("twilio delivery status workflow", () => {
+  const workflow = loadWorkflow("twilio-status.json");
+
+  function normalize(params: Record<string, string>, forge = false) {
+    const signature = forge ? "forged" : twilioSignature(params, "twilio-status");
+    return runCodeNode(workflow, "Normalize", [
+      { json: { headers: { "x-twilio-signature": signature }, body: params } },
+    ]);
+  }
+
+  test("normalizes a signed delivery callback", () => {
+    const [result] = normalize({
+      MessageSid: "SMfake00000000000000000000000009",
+      MessageStatus: "delivered",
+    });
+    expect(result.json.reject).toBe(false);
+    expect(result.json.payload).toMatchObject({
+      provider_sid: "SMfake00000000000000000000000009",
+      status: "delivered",
+    });
+  });
+
+  test("carries bounded provider error details on failure", () => {
+    const [result] = normalize({
+      MessageSid: "SMfake00000000000000000000000010",
+      MessageStatus: "undelivered",
+      ErrorCode: "30003",
+      ErrorMessage: "Unreachable destination handset",
+    });
+    expect(result.json.payload).toMatchObject({
+      status: "undelivered",
+      error_code: "30003",
+      error_message: "Unreachable destination handset",
+    });
+  });
+
+  test("rejects a forged signature", () => {
+    const [result] = normalize({ MessageSid: "SMx", MessageStatus: "delivered" }, true);
+    expect(result.json).toMatchObject({ reject: true, status: 403 });
+  });
+
+  test("relays to the CRM with a safely repeatable retry", () => {
+    const relay = workflow.nodes.find((node) => node.name === "CRM Status Update")!;
+    expect(relay.parameters.url).toBe("={{ $env.CRM_API_URL }}/api/v1/inbound/message-status");
+    expect(relay.retryOnFail).toBe(true);
+    expect(relay.maxTries).toBeLessThanOrEqual(3);
   });
 });

@@ -25,6 +25,9 @@ services:
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       INBOUND_API_KEY: ${INBOUND_API_KEY:-}
+      N8N_SEND_URL: ${N8N_SEND_URL:-http://n8n:5678/webhook/twilio-send}
+      N8N_SEND_SECRET: ${N8N_SEND_SECRET:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -48,6 +51,10 @@ services:
       context: ./web
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      # Server-side only: never exposed to the browser.
+      N8N_FORM_WEBHOOK_URL: ${N8N_FORM_WEBHOOK_URL:-http://n8n:5678/webhook/web-form}
+      FORM_SHARED_SECRET: ${FORM_SHARED_SECRET:-}
     ports:
       - "3000:3000"
     depends_on:
@@ -61,7 +68,7 @@ services:
       start_period: 15s
 
   n8n:
-    image: n8nio/n8n:1.64.0
+    image: n8nio/n8n:2.11.3
     environment:
       # Placeholder only — generate a real key per installation.
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-dev-only-n8n-encryption-key}
@@ -71,6 +78,14 @@ services:
       WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678}
       NODE_FUNCTION_ALLOW_BUILTIN: crypto
       N8N_BLOCK_ENV_ACCESS_IN_NODE: "false"
+      # n8n 2.x runs Code nodes in a task runner; it needs the same allowances.
+      N8N_RUNNERS_ENABLED: "true"
+      N8N_RUNNERS_MAX_CONCURRENCY: "5"
+      # The editor is exposed only on the local Compose port. Set these in any
+      # non-local deployment so the editor is never publicly unauthenticated.
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-false}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-}
       # Workflow configuration (all placeholders; never commit real values).
       CRM_API_URL: http://api:8000
       CRM_INBOUND_API_KEY: ${INBOUND_API_KEY:-}
@@ -79,8 +94,15 @@ services:
       META_APP_SECRET: ${META_APP_SECRET:-}
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
       FORM_SHARED_SECRET: ${FORM_SHARED_SECRET:-}
+      CRM_SEND_SECRET: ${N8N_SEND_SECRET:-}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      # Override only for local verification against a mock provider.
+      TWILIO_API_BASE: ${TWILIO_API_BASE:-https://api.twilio.com}
     ports:
-      - "5678:5678"
+      # Loopback-only: the editor is never exposed on the host's network
+      # interfaces. Production terminates provider webhooks at a reverse proxy.
+      - "127.0.0.1:5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n/workflows:/workflows:ro

@@ -54,13 +54,50 @@ def db(db_session_factory: sessionmaker[Session]) -> Generator[Session]:
     session.close()
 
 
+class RecordingSmsSender:
+    """Test double for outbound SMS; never contacts a real provider."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+        self.outcome = None
+        self.raise_error = False
+        self._counter = 0
+
+    def send(self, message):
+        from app.services.messaging import SendOutcome
+
+        if self.raise_error:
+            raise RuntimeError("simulated messaging failure")
+        self.sent.append(
+            {
+                "to": message.to_phone,
+                "body": message.body,
+                "purpose": message.purpose,
+                "message_id": str(message.id),
+            }
+        )
+        if self.outcome is not None:
+            return self.outcome
+        self._counter += 1
+        return SendOutcome(status="submitted", provider_sid=f"SMtest{self._counter:026d}")
+
+
 @pytest.fixture()
 def mailer() -> RecordingMailer:
     return RecordingMailer()
 
 
 @pytest.fixture()
-def app(db_session_factory: sessionmaker[Session], mailer: RecordingMailer) -> Generator[FastAPI]:
+def sms_sender() -> RecordingSmsSender:
+    return RecordingSmsSender()
+
+
+@pytest.fixture()
+def app(
+    db_session_factory: sessionmaker[Session],
+    mailer: RecordingMailer,
+    sms_sender: "RecordingSmsSender",
+) -> Generator[FastAPI]:
     application = create_app()
 
     def override_get_db() -> Generator[Session]:
@@ -72,6 +109,7 @@ def app(db_session_factory: sessionmaker[Session], mailer: RecordingMailer) -> G
 
     application.dependency_overrides[get_db] = override_get_db
     application.state.mailer = mailer
+    application.state.sms_sender = sms_sender
     yield application
     application.dependency_overrides.clear()
 

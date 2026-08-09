@@ -16,6 +16,7 @@ function Shell({ children }: { children: ReactNode }) {
           <Link href="/leads">Leads</Link>
           <Link href="/account">Account</Link>
           {user.role === "owner" && <Link href="/fields">Fields</Link>}
+          {user.role === "owner" && <Link href="/settings">Settings</Link>}
           {user.role === "owner" && <Link href="/users">Users</Link>}
         </nav>
         <div className="shell-user">

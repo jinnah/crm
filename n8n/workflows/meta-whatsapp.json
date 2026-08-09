@@ -55,6 +55,19 @@
     },
     {
       "parameters": {
+        "jsCode": "const item = $input.all()[0].json;\nreturn [{ json: { event: item.event, idempotency_key: item.idempotency_key } }];\n"
+      },
+      "id": "code-prepare-attempt",
+      "name": "Prepare Attempt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        640,
+        0
+      ]
+    },
+    {
+      "parameters": {
         "method": "POST",
         "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/events",
         "sendHeaders": true,
@@ -73,19 +86,98 @@
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json.event) }}",
-        "options": {}
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        }
       },
       "id": "crm-write",
       "name": "CRM Write",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [
-        660,
+        840,
         0
       ],
-      "retryOnFail": true,
-      "maxTries": 5,
-      "waitBetweenTries": 3000
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Selective retry: network errors, timeouts, 429 and 5xx are temporary and\n// worth retrying; 4xx validation/authentication failures are permanent and\n// must never be retried. Only non-personal fields are emitted.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\n\nconst response = $input.all()[0].json;\nconst request = $('Prepare Attempt').first().json;\nconst status = Number(response.statusCode || 0);\nconst carry = { event: request.event, idempotency_key: request.idempotency_key };\n\nif (status >= 200 && status < 300) {\n  const body = response.body || {};\n  return [{ json: { ...carry, outcome: 'success', lead_id: body.lead_id,\n    activity_id: body.activity_id, replayed: body.replayed === true } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { ...carry, outcome: 'permanent', status,\n    message: 'CRM rejected the request (' + status + ')' } }];\n}\nreturn [{ json: { ...carry, outcome: 'retry', status } }];\n"
+      },
+      "id": "code-classify-response",
+      "name": "Classify Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-outcome",
+      "name": "Route Outcome",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1240,
+        0
+      ]
     },
     {
       "parameters": {
@@ -97,8 +189,97 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
       "position": [
-        880,
-        0
+        1900,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/events",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            },
+            {
+              "name": "Idempotency-Key",
+              "value": "={{ $json.idempotency_key }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.event) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "crm-write-retry",
+      "name": "CRM Write Retry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1460,
+        40
+      ],
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Outcome of the bounded synchronous retries. No personal data is emitted.\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\nif (status >= 200 && status < 300) {\n  const body = response.body || {};\n  return [{ json: { outcome: 'success', lead_id: body.lead_id,\n    activity_id: body.activity_id, replayed: body.replayed === true } }];\n}\nreturn [{ json: { outcome: 'exhausted', status: 503,\n  message: 'CRM unavailable after retries' } }];\n"
+      },
+      "id": "code-classify-retry",
+      "name": "Classify Retry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.outcome === 'success' ? {status: 'ok', lead_id: $json.lead_id, activity_id: $json.activity_id, replayed: $json.replayed} : {error: $json.message}) }}",
+        "options": {
+          "responseCode": "={{ $json.outcome === 'success' ? 200 : 503 }}"
+        }
+      },
+      "id": "respond-retry-result",
+      "name": "Respond Retry Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1900,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-failure",
+      "name": "Respond Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1900,
+        220
       ]
     },
     {
@@ -114,8 +295,8 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
       "position": [
-        660,
-        220
+        640,
+        240
       ]
     },
     {
@@ -234,6 +415,17 @@
         ],
         [
           {
+            "node": "Prepare Attempt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Attempt": {
+      "main": [
+        [
+          {
             "node": "CRM Write",
             "type": "main",
             "index": 0
@@ -245,7 +437,65 @@
       "main": [
         [
           {
+            "node": "Classify Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Response": {
+      "main": [
+        [
+          {
+            "node": "Route Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Outcome": {
+      "main": [
+        [
+          {
             "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Write Retry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Write Retry": {
+      "main": [
+        [
+          {
+            "node": "Classify Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Retry": {
+      "main": [
+        [
+          {
+            "node": "Respond Retry Result",
             "type": "main",
             "index": 0
           }
@@ -294,7 +544,10 @@
     }
   },
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
   },
   "active": false,
   "pinData": {}

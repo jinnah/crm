@@ -5,6 +5,8 @@ import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
 import { CustomFieldInputs } from "@/components/custom-field-inputs";
 import { LeadBadges, sourceLabel, statusLabel } from "@/components/lead-badges";
+import { ResponseBadge } from "@/components/response-badge";
+import { SmsPanel } from "@/components/sms-panel";
 import {
   api,
   errorDetail,
@@ -105,7 +107,7 @@ export default function LeadDetailPage() {
     <section>
       <div className="page-head">
         <h1>
-          {lead.name || "Unnamed lead"} <LeadBadges lead={lead} />
+          {lead.name || "Unnamed lead"} <LeadBadges lead={lead} /> <ResponseBadge lead={lead} />
         </h1>
         {canManage &&
           (archived ? (
@@ -147,6 +149,21 @@ export default function LeadDetailPage() {
         <p>
           This lead is archived. Restore it to make changes; its history remains
           intact.
+        </p>
+      )}
+
+      {lead.first_inbound_at !== null && lead.first_response_at === null && !archived && (
+        <p className="button-row">
+          <button
+            type="button"
+            onClick={() => {
+              void runAction(`/leads/${lead.id}/mark-contacted`).then(
+                (ok) => ok && setNotice("Recorded as contacted outside the CRM."),
+              );
+            }}
+          >
+            Mark contacted outside CRM
+          </button>
         </p>
       )}
 
@@ -220,6 +237,13 @@ export default function LeadDetailPage() {
               }
             />
           )}
+          <SmsPanel
+            lead={lead}
+            activities={activities}
+            csrfToken={csrfToken}
+            canSend={canManage || lead.assigned_to === user.id}
+            onChanged={reload}
+          />
           <Timeline activities={activities} />
         </div>
       </div>

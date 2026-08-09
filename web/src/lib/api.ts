@@ -23,6 +23,7 @@ type ApiOptions = {
   method?: "GET" | "POST" | "PATCH" | "DELETE";
   body?: unknown;
   csrfToken?: string;
+  idempotencyKey?: string;
 };
 
 // All authentication state lives in an HttpOnly cookie managed by the API;
@@ -31,10 +32,11 @@ export async function api<T = unknown>(
   path: string,
   options: ApiOptions = {},
 ): Promise<ApiResult<T>> {
-  const { method = "GET", body, csrfToken } = options;
+  const { method = "GET", body, csrfToken, idempotencyKey } = options;
   const headers: Record<string, string> = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+  if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
 
   let response: Response;
   try {
@@ -71,6 +73,12 @@ export type Lead = {
   last_contacted_at: string | null;
   needs_review: boolean;
   archived_at: string | null;
+  first_inbound_at: string | null;
+  response_due_at: string | null;
+  first_response_at: string | null;
+  first_response_seconds: number | null;
+  response_target_met: boolean | null;
+  response_overdue: boolean;
   created_at: string;
   updated_at: string;
   custom_values: Record<string, unknown>;
@@ -102,6 +110,35 @@ export type AttentionQueue = {
   due_today: Lead[];
   unassigned: Lead[];
   needs_review: Lead[];
+  unresponded: Lead[];
+};
+
+export type OutboundMessage = {
+  id: string;
+  lead_id: string;
+  purpose: "human_reply" | "auto_acknowledgment" | "staff_alert";
+  to_phone: string;
+  body: string;
+  status: "pending" | "submitted" | "delivered" | "failed" | "unknown";
+  provider_sid: string | null;
+  error_message: string | null;
+  created_by_email: string | null;
+  created_at: string;
+  submitted_at: string | null;
+  delivered_at: string | null;
+  failed_at: string | null;
+};
+
+export type CommunicationSettings = {
+  business_name: string;
+  form_title: string;
+  form_intro: string;
+  acknowledgment_enabled: boolean;
+  acknowledgment_template: string;
+  alert_enabled: boolean;
+  alert_template: string;
+  alert_destination_phone: string | null;
+  response_target_minutes: number;
 };
 
 export type CustomField = {

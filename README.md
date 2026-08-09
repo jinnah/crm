@@ -133,11 +133,12 @@ Docker Compose includes an `n8n` service (http://localhost:5678, data persisted 
 
 ```bash
 docker compose exec n8n n8n import:workflow --separate --input=/workflows
-docker compose exec n8n n8n update:workflow --all --active=true
+# n8n 2.x publishes workflows individually (update:workflow --active was removed):
+docker compose exec n8n sh -c 'n8n list:workflow | cut -d"|" -f1 | xargs -I{} n8n publish:workflow --id={}'
 docker compose restart n8n
 ```
 
-Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms`, `/webhook/twilio-voice`, `/webhook/meta-whatsapp`, `/webhook/meta-messenger` (the Meta paths also answer the GET verification handshake). Configure the provider secrets in `.env` (`TWILIO_AUTH_TOKEN`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, optional `FORM_SHARED_SECRET`); signature checks reject unauthenticated calls. In the n8n UI, set "Inbound Error Handler" as the default error workflow for the channel workflows. Website forms POST JSON with `submission_id`, `name`, `email`/`phone`, `message`, and optional `form`/`page`/`campaign`/`referrer`/`submitted_at`.
+Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms`, `/webhook/twilio-voice`, `/webhook/twilio-status` (delivery callbacks), `/webhook/meta-whatsapp`, `/webhook/meta-messenger` (the Meta paths also answer the GET verification handshake), plus the internal `/webhook/twilio-send` the CRM calls to send SMS. Configure the provider secrets in `.env` (`TWILIO_AUTH_TOKEN`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, optional `FORM_SHARED_SECRET`); signature checks reject unauthenticated calls. In the n8n UI, set "Inbound Error Handler" as the default error workflow for the channel workflows. Website forms POST JSON with `submission_id`, `name`, `email`/`phone`, `message`, and optional `form`/`page`/`campaign`/`referrer`/`submitted_at`.
 
 ## Shutdown and cleanup
 
@@ -145,3 +146,14 @@ Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms
 docker compose down            # stop containers (data is kept)
 docker compose down -v         # stop and DELETE the database volume
 ```
+
+## Public request form
+
+The customer-facing form lives at `/request` in the same Next.js app. The browser posts to the same-origin route `/api/public-request`, which adds the server-side form secret and forwards to the n8n web-form webhook — no secrets ever reach the browser. Embed it on a customer site with an iframe:
+
+```html
+<iframe src="https://crm.example.com/request" title="Request a quote"
+        style="width:100%;max-width:640px;height:760px;border:0"></iframe>
+```
+
+Owners configure the form title, automated acknowledgment, new-lead alert, notification number and first-response target under **Settings** in the CRM. Templates accept `{{lead_name}}`, `{{business_name}}`, `{{source}}` and `{{lead_id}}`; any other variable is rejected.
