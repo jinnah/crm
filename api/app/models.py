@@ -8,6 +8,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Text,
     TypeDecorator,
@@ -343,6 +344,19 @@ class CommunicationSettings(Base):
     )
     # Weekday availability as {"mon": [["09:00", "17:00"]], ...} in business time.
     business_hours: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    # --- Branding -------------------------------------------------------
+    # The logo is small, single-tenant and changes rarely, so it lives in the
+    # database rather than pulling in an object store. What is stored is the
+    # re-encoded image the server produced, never the bytes that were
+    # uploaded; the digest doubles as the ETag.
+    logo_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    logo_mime: Mapped[str | None] = mapped_column(String(32))
+    logo_digest: Mapped[str | None] = mapped_column(String(64))
+    logo_width: Mapped[int | None] = mapped_column(Integer)
+    logo_height: Mapped[int | None] = mapped_column(Integer)
+    logo_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 

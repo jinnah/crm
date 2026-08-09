@@ -153,3 +153,9 @@ def default_login_limiter() -> SlidingWindowRateLimiter:
 def default_recovery_limiter() -> SlidingWindowRateLimiter:
     # 3 recovery requests per 15 minutes per key, 15-minute lockout.
     return SlidingWindowRateLimiter(max_events=3, window_seconds=900, lockout_seconds=900)
+
+
+def default_branding_limiter() -> SlidingWindowRateLimiter:
+    # Logo changes are rare and expensive to process: 10 per 10 minutes per
+    # account, then a 10-minute lockout.
+    return SlidingWindowRateLimiter(max_events=10, window_seconds=600, lockout_seconds=600)

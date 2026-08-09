@@ -295,6 +295,18 @@ class UpdateCommunicationSettingsRequest(BaseModel):
     response_target_minutes: int | None = Field(default=None, ge=1, le=10_080)
 
 
+class BrandingOut(BaseModel):
+    """Logo metadata only. The bytes are served from their own cacheable
+    route, never embedded in a settings response."""
+
+    business_name: str
+    has_logo: bool
+    width: int | None = None
+    height: int | None = None
+    updated_at: datetime | None = None
+    initials: str
+
+
 class PublicFormInfoOut(BaseModel):
     """Safe, public-facing subset of the settings for the request form."""
 

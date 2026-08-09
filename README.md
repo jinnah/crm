@@ -180,6 +180,10 @@ The customer-facing form lives at `/request` in the same Next.js app. The browse
 
 Owners configure the form title, automated acknowledgment, new-lead alert, notification number and first-response target under **Settings** in the CRM. Templates accept `{{lead_name}}`, `{{business_name}}`, `{{source}}` and `{{lead_id}}`; any other variable is rejected.
 
+## Branding and the business logo
+
+Owners upload a logo under **Settings → Business & branding**. The server accepts PNG, JPEG or WebP up to 1 MB, verifies the file by decoding it (SVG, HTML, animated images and spoofed content types are refused regardless of filename), applies the EXIF orientation, strips all metadata, scales to at most 512px and re-encodes to PNG — the uploaded bytes themselves are never stored. The normalized image lives in PostgreSQL on the settings row and is served at `GET /api/v1/public/logo` with an `ETag`, `X-Content-Type-Options: nosniff` and short revalidating cache headers, so the CRM shell and the public booking/request pages all share one cached copy. Without a logo, a wordmark built from the business initials is shown instead. Downgrading the logo migration refuses to run while a logo is stored; remove it first.
+
 ## Appointments and reminders
 
 Owners set the business time zone (IANA name), default appointment length, minimum booking notice, how far ahead customers may book, buffers either side, per-weekday business hours, message templates and reminder offsets under **Settings → Scheduling**. Appointment templates accept `{{lead_name}}`, `{{business_name}}`, `{{appointment_date}}`, `{{appointment_time}}`, `{{assigned_staff}}`, `{{appointment_subject}}` and `{{booking_reference}}`; any other variable is rejected.

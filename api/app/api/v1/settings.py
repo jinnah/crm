@@ -1,7 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
+from typing import Annotated
 
-from app.api.v1.deps import DbDep, FullyAuthedUserDep, check_csrf, check_origin
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+
+from app.api.v1.deps import (
+    DbDep,
+    FullyAuthedUserDep,
+    check_csrf,
+    check_origin,
+    get_branding_limiter,
+)
 from app.api.v1.schemas import (
+    BrandingOut,
     CommunicationSettingsOut,
     PublicFormInfoOut,
     SchedulingBasicsOut,
@@ -9,8 +18,9 @@ from app.api.v1.schemas import (
     UpdateCommunicationSettingsRequest,
     UpdateSchedulingSettingsRequest,
 )
-from app.services import messaging, scheduling
+from app.services import branding, messaging, scheduling
 from app.services.leads import LeadError
+from app.services.rate_limit import RateLimiter
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -139,3 +149,113 @@ def update_scheduling_settings(
         raise HTTPException(status_code=error.status_code, detail=error.message) from error
     db.commit()
     return SchedulingSettingsOut.model_validate(row)
+
+
+# --- Branding ------------------------------------------------------------
+#
+# The upload is sent as a raw image body, not multipart: there is no form to
+# parse, so no multipart parser ever sees the bytes and nothing but the image
+# itself can be smuggled in. The 1 MiB ceiling is enforced ahead of this by
+# BodyLimitMiddleware on the /api/v1/settings/branding prefix.
+
+LimiterDep = Annotated[RateLimiter, Depends(get_branding_limiter)]
+
+
+def _branding_out(row) -> BrandingOut:
+    return BrandingOut(
+        business_name=row.business_name,
+        has_logo=row.logo_bytes is not None,
+        width=row.logo_width,
+        height=row.logo_height,
+        updated_at=row.logo_updated_at,
+        initials=branding.initials(row.business_name),
+    )
+
+
+@router.get("/branding", response_model=BrandingOut, dependencies=[Depends(check_origin)])
+def get_branding(user: FullyAuthedUserDep, db: DbDep) -> BrandingOut:
+    """Metadata for the branding editor. Any signed-in user may read it — the
+    logo is shown in the shell they already see."""
+    row = messaging.get_settings_row(db)
+    db.commit()
+    return _branding_out(row)
+
+
+@router.post(
+    "/branding/logo",
+    response_model=BrandingOut,
+    dependencies=[Depends(check_origin), Depends(check_csrf)],
+)
+async def upload_logo(
+    request: Request, user: FullyAuthedUserDep, db: DbDep, limiter: LimiterDep
+) -> BrandingOut:
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Only an owner may change the logo.")
+    key = f"branding:{user.id}"
+    if not limiter.allowed(key):
+        raise HTTPException(
+            status_code=429, detail="Too many logo changes. Try again in a few minutes."
+        )
+    limiter.record(key)
+
+    raw = await request.body()
+    row = messaging.get_settings_row(db)
+    try:
+        branding.set_logo(db, row, raw)
+    except LeadError as error:
+        db.rollback()
+        raise HTTPException(status_code=error.status_code, detail=error.message) from error
+    db.commit()
+    return _branding_out(row)
+
+
+@router.delete(
+    "/branding/logo",
+    response_model=BrandingOut,
+    dependencies=[Depends(check_origin), Depends(check_csrf)],
+)
+def remove_logo(user: FullyAuthedUserDep, db: DbDep) -> BrandingOut:
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="Only an owner may change the logo.")
+    row = messaging.get_settings_row(db)
+    branding.clear_logo(db, row)
+    db.commit()
+    return _branding_out(row)
+
+
+@public_router.get("/logo")
+def public_logo(request: Request, db: DbDep) -> Response:
+    """The stored logo, on a stable unauthenticated route.
+
+    Both the CRM shell and the customer-facing pages point at this, so the
+    image is cached once and no private setting travels with it.
+    """
+    row = messaging.get_settings_row(db)
+    db.commit()
+    if row.logo_bytes is None or row.logo_digest is None:
+        raise HTTPException(status_code=404, detail="No logo has been set.")
+
+    etag = f'"{row.logo_digest}"'
+    headers = {
+        "ETag": etag,
+        # The digest changes whenever the image does, so a short max-age plus
+        # revalidation keeps a replaced logo from lingering in a browser.
+        "Cache-Control": "public, max-age=300, must-revalidate",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(
+        content=row.logo_bytes,
+        media_type=row.logo_mime or branding.STORED_MIME,
+        headers=headers,
+    )
+
+
+@public_router.get("/branding", response_model=BrandingOut)
+def public_branding(db: DbDep) -> BrandingOut:
+    """What a customer-facing page needs to render the header: the business
+    name, whether a logo exists, and the fallback initials."""
+    row = messaging.get_settings_row(db)
+    db.commit()
+    return _branding_out(row)

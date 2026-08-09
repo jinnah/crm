@@ -19,9 +19,14 @@ from app.api.v1.settings import router as settings_router
 from app.api.v1.users import router as users_router
 from app.config import get_settings, validate_production_settings
 from app.middleware import BodyLimitMiddleware
+from app.services.branding import MAX_UPLOAD_BYTES as MAX_LOGO_BYTES
 from app.services.mailer import SmtpMailer
 from app.services.messaging import N8nSmsSender
-from app.services.rate_limit import default_login_limiter, default_recovery_limiter
+from app.services.rate_limit import (
+    default_branding_limiter,
+    default_login_limiter,
+    default_recovery_limiter,
+)
 
 
 def create_app() -> FastAPI:
@@ -41,9 +46,18 @@ def create_app() -> FastAPI:
     app.add_middleware(
         BodyLimitMiddleware, max_bytes=MAX_BODY_BYTES, path_prefixes=("/api/v1/inbound",)
     )
+    # The logo upload has its own, larger ceiling — still enforced on received
+    # bytes before the endpoint ever runs, so an oversized image is refused
+    # while it is still streaming rather than after it is buffered.
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_bytes=MAX_LOGO_BYTES,
+        path_prefixes=("/api/v1/settings/branding",),
+    )
 
     app.state.login_limiter = default_login_limiter()
     app.state.recovery_limiter = default_recovery_limiter()
+    app.state.branding_limiter = default_branding_limiter()
     app.state.mailer = SmtpMailer(settings)
     app.state.sms_sender = N8nSmsSender(settings)
 

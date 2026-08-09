@@ -86,6 +86,10 @@ def get_recovery_limiter(request: Request) -> RateLimiter:
     return request.app.state.recovery_limiter
 
 
+def get_branding_limiter(request: Request) -> RateLimiter:
+    return request.app.state.branding_limiter
+
+
 def get_mailer(request: Request):
     return request.app.state.mailer
 
