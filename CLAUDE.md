@@ -39,11 +39,13 @@ Do not introduce: microservices, Kubernetes, message brokers, extra frontends, s
 
 ## Current phase
 
-**Phase 1 complete — awaiting lead-architect review.** Phase 0 (foundation) approved. Phase 1 adds authentication and user access: email/password login with Argon2id hashing, opaque server-side sessions in HttpOnly cookies (peppered HMAC digests, 8h inactivity / 7d absolute), session-bound CSRF synchronizer tokens, Origin validation, in-memory login/recovery rate limiting, SMTP password recovery (30-minute single-use tokens), owner/manager/team_member roles enforced in services, forced first-login password change, owner-only user management (no hard deletes, last-active-owner protection), interactive CLI owner bootstrap and emergency reset, and the protected CRM shell.
+**Core CRM milestone complete — awaiting lead-architect review.** Phases 0–1 approved (foundation; authentication and user access — Argon2id, opaque peppered sessions, CSRF, roles, forced password change, owner-only user management, CLI bootstrap/reset).
 
-Phase 1 rules: no public registration, no MFA/OAuth/social login/magic links, no JWTs or browser-storage auth, no Redis or background workers, password policy is 12–128 chars with no composition rules, generic errors for login/recovery (no account enumeration), never store or log raw tokens or plaintext passwords.
+The CRM milestone adds: single `Lead` record (statuses new/contacted/qualified/won/lost; archive/restore, never hard-delete; E.164 phone when the country code is present — never guessed), role-scoped access (owners/managers see and manage everything; team members see only assigned leads and may change status, follow-ups, notes and custom values), activity timeline with automatic entries for status/assignment/follow-up/archive changes (inbound requests are immutable history), owner-managed custom fields (text/number/date/boolean/select; immutable keys; deactivation preserves data), attention queue (overdue and due-today follow-ups, new unassigned, needs-review), and the authenticated idempotent `POST /api/v1/inbound/events` endpoint for n8n (X-API-Key auth via INBOUND_API_KEY, required Idempotency-Key stored as keyed digest with a PostgreSQL unique constraint, conservative exact email/phone matching, ambiguous or identity-less events become needs_review leads).
 
-Deferred to later phases: leads and statuses, custom fields, embedded form, n8n workflows, Twilio, Gmail/Outlook, notes/follow-ups, activity history, Sheets integration and import, production deployment automation.
+Phase 1 rules remain: no public registration, MFA/OAuth, JWTs or browser-storage auth, Redis, or background workers; generic errors; never store or log raw tokens or plaintext passwords.
+
+Deferred to later phases: actual n8n workflows and provider integrations (Twilio, WhatsApp, Facebook, Gmail/Outlook), embedded public web form, Sheets integration and import, two-way messaging, response-time tracking, production deployment automation.
 
 ## Validation commands
 

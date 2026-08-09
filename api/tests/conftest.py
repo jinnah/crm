@@ -1,3 +1,4 @@
+import os
 from collections.abc import Generator
 
 import pytest
@@ -7,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.config import get_settings
 from app.db import get_db
 from app.main import create_app
 from app.models import Base, User
@@ -14,6 +16,11 @@ from app.security.passwords import hash_password
 
 # Long enough for the 12-character policy; used across the test suite.
 DEFAULT_PASSWORD = "correct horse battery staple"
+
+# Test-only inbound API key (≥32 chars); real keys are generated per install.
+TEST_INBOUND_KEY = "test-inbound-api-key-0123456789abcdef"
+os.environ["INBOUND_API_KEY"] = TEST_INBOUND_KEY
+get_settings.cache_clear()
 
 
 class RecordingMailer:

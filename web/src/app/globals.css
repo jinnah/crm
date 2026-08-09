@@ -234,3 +234,151 @@ button:disabled {
   max-width: 24rem;
   margin-top: 1rem;
 }
+
+/* CRM lead screens */
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.button-link {
+  display: inline-block;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--foreground);
+  color: var(--background);
+  text-decoration: none;
+}
+
+.lead-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.lead-filters .form-field {
+  margin-bottom: 0;
+  min-width: 8rem;
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  vertical-align: top;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.badge-review {
+  border-color: #b3261e;
+  color: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .badge-review {
+    border-color: #ff8a80;
+    color: #ff8a80;
+  }
+}
+
+.lead-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: 2rem;
+  margin-top: 1rem;
+}
+
+.lead-columns h2 {
+  margin: 0.75rem 0 0.5rem;
+}
+
+.narrow-form {
+  max-width: 28rem;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.form-field textarea {
+  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.timeline-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.timeline-item {
+  border-left: 3px solid color-mix(in srgb, var(--foreground) 25%, transparent);
+  padding-left: 0.75rem;
+}
+
+.timeline-meta {
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.timeline-content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.attention-group {
+  margin-bottom: 1rem;
+}
+
+.attention-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.attention-list a {
+  text-decoration: underline;
+}
+
+.attention-when,
+.attention-who {
+  font-size: 0.9rem;
+  opacity: 0.85;
+}

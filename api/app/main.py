@@ -4,8 +4,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.auth import router as auth_router
+from app.api.v1.custom_fields import router as custom_fields_router
 from app.api.v1.deps import CSRF_HEADER
 from app.api.v1.health import router as health_router
+from app.api.v1.inbound import router as inbound_router
+from app.api.v1.leads import router as leads_router
 from app.api.v1.users import router as users_router
 from app.config import get_settings, validate_production_settings
 from app.services.mailer import SmtpMailer
@@ -44,6 +47,9 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
+    app.include_router(leads_router, prefix="/api/v1")
+    app.include_router(custom_fields_router, prefix="/api/v1")
+    app.include_router(inbound_router, prefix="/api/v1")
     return app
 
 

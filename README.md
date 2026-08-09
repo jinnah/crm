@@ -123,6 +123,10 @@ Inside Docker Compose, prefix with `docker compose exec api` and use `uv run --f
 
 The owner account created at first login must change its temporary password before entering the CRM. Further users are created by an owner from the CRM's user-management page.
 
+## Inbound events (n8n)
+
+`POST /api/v1/inbound/events` captures inbound requests (web form, phone call, SMS, WhatsApp, Facebook, email) as leads and timeline activities. It authenticates with the server-side `INBOUND_API_KEY` (sent as `X-API-Key`; generate with the command shown in `.env.example`) and requires an `Idempotency-Key` header per event — retries with the same key safely return the original result. n8n workflows call this endpoint; nothing writes to PostgreSQL directly.
+
 ## Shutdown and cleanup
 
 ```bash

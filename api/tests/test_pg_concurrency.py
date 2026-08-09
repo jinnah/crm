@@ -152,3 +152,52 @@ def test_concurrent_duplicate_email_creation_yields_one_conflict(pg_session_fact
     rows = check.scalars(select(User).where(User.email == "new.hire@example.com")).all()
     check.close()
     assert len(rows) == 1, "exactly one creation must succeed"
+
+
+def test_concurrent_inbound_duplicates_yield_one_lead_and_activity(pg_session_factory) -> None:
+    """Two simultaneous inbound submissions with the same Idempotency-Key must
+    produce exactly one lead, one activity, and identical responses."""
+    from sqlalchemy import func
+
+    from app.api.v1.schemas import InboundEventRequest
+    from app.config import get_settings
+    from app.models import InboundEvent, Lead, LeadActivity
+    from app.services.inbound import process_inbound_event
+
+    payload = InboundEventRequest(
+        channel="sms",
+        provider="twilio",
+        external_event_id="SM-concurrent",
+        sender_phone="+15550107777",
+        content="Concurrent hello",
+    )
+    settings = get_settings()
+    barrier = threading.Barrier(2)
+    results: list[tuple[str, str, bool]] = []
+    errors: list[Exception] = []
+
+    def submit() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            result = process_inbound_event(session, payload, "evt-concurrent-1", settings)
+            results.append((str(result.lead.id), str(result.activity.id), result.replayed))
+        except Exception as error:  # pragma: no cover - failure diagnostics
+            errors.append(error)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert not errors, errors
+    assert len(results) == 2
+    assert results[0][:2] == results[1][:2], "both requests must return the same lead/activity"
+
+    check = pg_session_factory()
+    assert check.scalar(select(func.count()).select_from(Lead)) == 1
+    assert check.scalar(select(func.count()).select_from(LeadActivity)) == 1
+    assert check.scalar(select(func.count()).select_from(InboundEvent)) == 1
+    check.close()

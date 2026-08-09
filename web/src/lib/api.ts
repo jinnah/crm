@@ -57,6 +57,83 @@ export async function api<T = unknown>(
   return { ok: response.ok, status: response.status, data };
 }
 
+export type Lead = {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  company: string;
+  status: string;
+  source: string;
+  assigned_to: string | null;
+  assignee_email: string | null;
+  next_follow_up_at: string | null;
+  last_contacted_at: string | null;
+  needs_review: boolean;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+  custom_values: Record<string, unknown>;
+};
+
+export type LeadList = {
+  items: Lead[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type Activity = {
+  id: string;
+  type: string;
+  channel: string | null;
+  direction: string | null;
+  content: string;
+  created_by_email: string | null;
+  provider: string | null;
+  external_event_id: string | null;
+  occurred_at: string | null;
+  meta: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type AttentionQueue = {
+  overdue: Lead[];
+  due_today: Lead[];
+  unassigned: Lead[];
+  needs_review: Lead[];
+};
+
+export type CustomField = {
+  id: string;
+  key: string;
+  label: string;
+  type: "text" | "number" | "date" | "boolean" | "select";
+  options: string[] | null;
+  required: boolean;
+  is_active: boolean;
+  display_order: number;
+};
+
+export type AssignableUser = {
+  id: string;
+  email: string;
+  role: Role;
+};
+
+export const LEAD_STATUSES = ["new", "contacted", "qualified", "won", "lost"] as const;
+
+export const LEAD_SOURCES = [
+  "manual",
+  "web_form",
+  "phone_call",
+  "sms",
+  "whatsapp",
+  "facebook",
+  "email",
+  "other",
+] as const;
+
 export function errorDetail(data: unknown, fallback: string): string {
   if (
     data !== null &&

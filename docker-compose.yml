@@ -24,6 +24,7 @@ services:
       SESSION_TOKEN_PEPPER: ${SESSION_TOKEN_PEPPER:-dev-only-pepper-not-for-production}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      INBOUND_API_KEY: ${INBOUND_API_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}

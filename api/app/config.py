@@ -49,6 +49,10 @@ class Settings(BaseSettings):
     # Public frontend URL, used for password-reset links and Origin validation.
     frontend_url: str = "http://localhost:3000"
 
+    # Server-side API key for the n8n inbound-event endpoint. Empty disables
+    # the endpoint (all requests rejected). Never exposed to the browser.
+    inbound_api_key: str = ""
+
     # Transactional SMTP for password-recovery email (not the future CRM email integration).
     smtp_host: str = ""
     smtp_port: int = 587
@@ -84,6 +88,8 @@ def validate_production_settings(settings: Settings) -> None:
         problems.append("SESSION_COOKIE_SECURE must be true in production")
     if not settings.frontend_url.startswith("https://"):
         problems.append("FRONTEND_URL must be an https origin in production")
+    if settings.inbound_api_key and len(settings.inbound_api_key) < 32:
+        problems.append("INBOUND_API_KEY must be at least 32 characters when set")
     if problems:
         raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
 
