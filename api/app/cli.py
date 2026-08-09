@@ -17,7 +17,7 @@ from pydantic import EmailStr, TypeAdapter, ValidationError
 from sqlalchemy.orm import Session
 
 from app.db import get_sessionmaker
-from app.models import User
+from app.models import User, utcnow
 from app.security.passwords import hash_password, validate_password
 from app.services.auth import get_user_by_email, normalize_email, revoke_all_sessions
 
@@ -86,6 +86,7 @@ def reset_password(db: Session) -> int:
         return 1
     user.password_hash = hash_password(password)
     user.must_change_password = True
+    user.password_changed_at = utcnow()
     revoke_all_sessions(db, user.id)
     db.commit()
     print(f"Password reset for {email}. All sessions revoked; change required at next login.")

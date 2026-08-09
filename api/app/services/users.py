@@ -1,4 +1,5 @@
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import ROLES, User, utcnow
@@ -27,6 +28,20 @@ def count_active_owners(db: Session) -> int:
     )
 
 
+def _lock_active_owners(db: Session) -> int:
+    """Row-lock the active owners (SELECT ... FOR UPDATE) and return their count.
+
+    Serializes concurrent owner demotions/deactivations in PostgreSQL so two
+    transactions cannot each observe two active owners and remove both. SQLite
+    (used by unit tests) ignores FOR UPDATE; the PostgreSQL behavior is covered
+    by the dedicated concurrency test.
+    """
+    owners = db.scalars(
+        select(User).where(User.role == "owner", User.is_active).with_for_update()
+    ).all()
+    return len(owners)
+
+
 def list_users(db: Session, acting_user: User) -> list[User]:
     _require_owner(acting_user)
     return list(db.scalars(select(User).order_by(User.created_at, User.email)))
@@ -52,7 +67,15 @@ def create_user(
         must_change_password=True,
     )
     db.add(user)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as error:
+        # A concurrent transaction created the same normalized email between
+        # the check above and this insert; surface the same safe conflict.
+        db.rollback()
+        raise UserManagementError(
+            "An account with this email already exists.", status_code=409
+        ) from error
     return user
 
 
@@ -71,7 +94,9 @@ def update_user(
     still_owner = (role or user.role) == "owner" and (
         is_active if is_active is not None else user.is_active
     )
-    if removes_owner and not still_owner and count_active_owners(db) <= 1:
+    # Lock the active-owner rows before counting so concurrent removals are
+    # serialized and re-evaluated against committed state.
+    if removes_owner and not still_owner and _lock_active_owners(db) <= 1:
         raise UserManagementError(
             "Cannot demote or deactivate the last active owner.", status_code=409
         )

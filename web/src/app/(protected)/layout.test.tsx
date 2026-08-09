@@ -102,3 +102,41 @@ test("logout posts to the API with the CSRF token and redirects to login", async
   expect((logoutCall![1] as RequestInit).method).toBe("POST");
   expect((logoutCall![1] as RequestInit).headers).toMatchObject({ "X-CSRF-Token": "csrf-token" });
 });
+
+test("a failed logout shows an error, allows retry, and does not redirect", async () => {
+  stubFetchRoutes([
+    ["/auth/session", { status: 200, body: { user: makeUser(), csrf_token: "csrf-token" } }],
+    ["/auth/logout", { status: 500, body: { detail: "Internal error" } }],
+  ]);
+  render(
+    <ProtectedLayout>
+      <p>Shell content</p>
+    </ProtectedLayout>,
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unable to log out");
+  expect(replace).not.toHaveBeenCalledWith("/login");
+  // The user is still presented as signed in and can retry.
+  expect(screen.getByText("Shell content")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Log out" })).toBeEnabled();
+});
+
+test("duplicate logout clicks send a single request", async () => {
+  const fetchMock = stubFetchRoutes([
+    ["/auth/session", { status: 200, body: { user: makeUser(), csrf_token: "csrf-token" } }],
+    ["/auth/logout", { status: 204, body: null }],
+  ]);
+  render(
+    <ProtectedLayout>
+      <p>Shell content</p>
+    </ProtectedLayout>,
+  );
+  const button = await screen.findByRole("button", { name: "Log out" });
+  fireEvent.click(button);
+  fireEvent.click(button);
+  await waitFor(() => expect(replace).toHaveBeenCalledWith("/login"));
+  const logoutCalls = fetchMock.mock.calls.filter(([url]) =>
+    String(url).includes("/auth/logout"),
+  );
+  expect(logoutCalls).toHaveLength(1);
+});

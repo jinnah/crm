@@ -73,6 +73,7 @@ def test_emergency_reset_revokes_sessions_and_forces_change(db, make_user, monke
     db.expire_all()
     user = db.scalar(select(User))
     assert user.must_change_password is True
+    assert user.password_changed_at is not None
     assert verify_password(user.password_hash, new_temp)
     assert not verify_password(user.password_hash, DEFAULT_PASSWORD)
     session = db.scalar(select(AuthSession))

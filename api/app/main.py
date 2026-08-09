@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from collections.abc import Awaitable, Callable
+
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.auth import router as auth_router
@@ -26,6 +28,18 @@ def create_app() -> FastAPI:
     app.state.login_limiter = default_login_limiter()
     app.state.recovery_limiter = default_recovery_limiter()
     app.state.mailer = SmtpMailer(settings)
+
+    @app.middleware("http")
+    async def no_store_sensitive_responses(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        # Authentication, session, CSRF and user-management responses must
+        # never be cached by browsers or intermediaries.
+        response = await call_next(request)
+        path = request.url.path
+        if path.startswith("/api/v1/auth") or path.startswith("/api/v1/users"):
+            response.headers.setdefault("Cache-Control", "no-store")
+        return response
 
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(auth_router, prefix="/api/v1")

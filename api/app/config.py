@@ -1,5 +1,8 @@
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Values that must never reach production; checked by validate_production_settings.
@@ -11,11 +14,28 @@ _PLACEHOLDER_SECRETS = {
 }
 
 
+def _validate_http_origin(value: str, field_name: str) -> str:
+    """Require a bare http(s) origin (scheme://host[:port], no path/query)."""
+    parts = urlsplit(value)
+    if (
+        parts.scheme not in ("http", "https")
+        or not parts.netloc
+        or parts.path not in ("", "/")
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(
+            f"{field_name} must be an http(s) origin like https://crm.example.com "
+            "with no path or query"
+        )
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     app_name: str = "Service CRM"
-    environment: str = "development"
+    environment: Literal["development", "test", "production"] = "development"
     database_url: str = "postgresql+psycopg://crm:crm@localhost:5432/crm"
     cors_origins: list[str] = ["http://localhost:3000"]
 
@@ -35,7 +55,21 @@ class Settings(BaseSettings):
     smtp_username: str = ""
     smtp_password: str = ""
     smtp_sender: str = ""
-    smtp_tls: str = "starttls"  # starttls | ssl | none
+    smtp_tls: Literal["starttls", "ssl", "none"] = "starttls"
+
+    @field_validator("cors_origins")
+    @classmethod
+    def _no_wildcard_origins(cls, value: list[str]) -> list[str]:
+        # Credentials are always enabled for this API; a wildcard origin with
+        # credentials is never acceptable.
+        if any(origin.strip() == "*" for origin in value):
+            raise ValueError("CORS_ORIGINS must not contain a wildcard origin")
+        return value
+
+    @field_validator("frontend_url")
+    @classmethod
+    def _frontend_url_is_origin(cls, value: str) -> str:
+        return _validate_http_origin(value, "FRONTEND_URL")
 
 
 def validate_production_settings(settings: Settings) -> None:
@@ -48,6 +82,8 @@ def validate_production_settings(settings: Settings) -> None:
         problems.append("SESSION_TOKEN_PEPPER must be a generated secret of at least 32 characters")
     if not settings.session_cookie_secure:
         problems.append("SESSION_COOKIE_SECURE must be true in production")
+    if not settings.frontend_url.startswith("https://"):
+        problems.append("FRONTEND_URL must be an https origin in production")
     if problems:
         raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
 

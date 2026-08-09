@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useLogout } from "@/components/use-logout";
 import { api, type SessionData, type SessionUser } from "@/lib/api";
 
 type AuthState = {
@@ -16,6 +17,8 @@ type AuthState = {
   csrfToken: string;
   refresh: () => Promise<void>;
   logout: () => Promise<void>;
+  loggingOut: boolean;
+  logoutError: string | null;
 };
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -61,12 +64,11 @@ export function AuthGuard({ children }: { children: ReactNode }) {
     setReloadNonce((value) => value + 1);
   }, []);
 
-  const logout = useCallback(async () => {
-    if (session !== null) {
-      await api("/auth/logout", { method: "POST", csrfToken: session.csrf_token });
-    }
-    router.replace("/login");
-  }, [router, session]);
+  const {
+    logout,
+    pending: loggingOut,
+    error: logoutError,
+  } = useLogout(session?.csrf_token ?? null);
 
   if (session === null) {
     return (
@@ -78,7 +80,14 @@ export function AuthGuard({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user: session.user, csrfToken: session.csrf_token, refresh, logout }}
+      value={{
+        user: session.user,
+        csrfToken: session.csrf_token,
+        refresh,
+        logout,
+        loggingOut,
+        logoutError,
+      }}
     >
       {children}
     </AuthContext.Provider>

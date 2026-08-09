@@ -30,6 +30,18 @@ def test_login_success_sets_cookie_and_returns_user(client, make_user) -> None:
     assert "Path=/" in set_cookie
 
 
+def test_auth_and_user_responses_are_never_cached(client, make_user) -> None:
+    make_user(email="owner@example.com")
+    login_response = login(client, "owner@example.com")
+    assert login_response.headers["cache-control"] == "no-store"
+    assert client.get("/api/v1/auth/session").headers["cache-control"] == "no-store"
+    assert client.get("/api/v1/users").headers["cache-control"] == "no-store"
+    forgot = client.post("/api/v1/auth/forgot-password", json={"email": "owner@example.com"})
+    assert forgot.headers["cache-control"] == "no-store"
+    # Non-sensitive endpoints are unaffected.
+    assert "cache-control" not in client.get("/api/v1/health").headers
+
+
 def test_secure_cookie_flag_in_production_config() -> None:
     response = Response()
     _set_session_cookie(response, "token", Settings(session_cookie_secure=True))

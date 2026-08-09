@@ -6,7 +6,7 @@ import { AuthGuard, useAuth } from "@/components/auth-context";
 import { roleLabel } from "@/lib/roles";
 
 function Shell({ children }: { children: ReactNode }) {
-  const { user, logout } = useAuth();
+  const { user, logout, loggingOut, logoutError } = useAuth();
   return (
     <div className="shell">
       <header className="shell-header">
@@ -20,11 +20,16 @@ function Shell({ children }: { children: ReactNode }) {
           <span className="shell-identity">
             {user.email} · {roleLabel(user.role)}
           </span>
-          <button type="button" onClick={() => void logout()}>
-            Log out
+          <button type="button" onClick={() => void logout()} disabled={loggingOut}>
+            {loggingOut ? "Logging out…" : "Log out"}
           </button>
         </div>
       </header>
+      {logoutError !== null && (
+        <p className="form-error shell-alert" role="alert">
+          {logoutError}
+        </p>
+      )}
       <main className="shell-main">{children}</main>
     </div>
   );

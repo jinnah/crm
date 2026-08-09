@@ -64,3 +64,35 @@ test("forces the flagged user through the change flow, then enters the shell", a
     "X-CSRF-Token": "csrf-token",
   });
 });
+
+function stubForcedSession(logoutStatus: number) {
+  return stubFetchRoutes([
+    [
+      "/auth/session",
+      {
+        status: 200,
+        body: { user: makeUser({ must_change_password: true }), csrf_token: "csrf-token" },
+      },
+    ],
+    ["/auth/logout", { status: logoutStatus, body: logoutStatus === 204 ? null : {} }],
+  ]);
+}
+
+test("a forced-change user can log out", async () => {
+  const fetchMock = stubForcedSession(204);
+  render(<ChangePasswordPage />);
+  fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
+  await waitFor(() => expect(replace).toHaveBeenCalledWith("/login"));
+  const logoutCall = fetchMock.mock.calls.find(([url]) => String(url).includes("/auth/logout"));
+  expect(logoutCall).toBeDefined();
+  expect((logoutCall![1] as RequestInit).headers).toMatchObject({ "X-CSRF-Token": "csrf-token" });
+});
+
+test("a failed logout on the forced-change page shows an error and stays", async () => {
+  stubForcedSession(500);
+  render(<ChangePasswordPage />);
+  fireEvent.click(await screen.findByRole("button", { name: "Log out" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Unable to log out");
+  expect(replace).not.toHaveBeenCalledWith("/login");
+  expect(screen.getByRole("button", { name: "Log out" })).toBeEnabled();
+});

@@ -179,6 +179,10 @@ button:disabled {
   opacity: 0.85;
 }
 
+.shell-alert {
+  padding: 0.5rem 1.5rem;
+}
+
 .shell-main {
   flex: 1;
   padding: 1.5rem;

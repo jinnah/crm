@@ -165,6 +165,27 @@ def test_admin_password_reset_revokes_sessions_and_forces_change(client, app, ma
     assert relogin.json()["user"]["must_change_password"] is True
 
 
+def test_duplicate_email_race_returns_conflict_not_500(db, make_user, monkeypatch) -> None:
+    """If the pre-insert existence check misses a concurrent insert, the
+    unique-constraint violation is converted into the same safe 409."""
+    from app.services import users as user_service
+    from app.services.users import UserManagementError
+
+    owner = make_user(email="owner@example.com", role="owner")
+    make_user(email="taken@example.com", role="team_member")
+    # Simulate the race: the check sees no user, but the row already exists.
+    monkeypatch.setattr(user_service, "get_user_by_email", lambda _db, _email: None)
+
+    try:
+        user_service.create_user(db, owner, "taken@example.com", "manager", TEMP_PASSWORD)
+        raised = None
+    except UserManagementError as error:
+        raised = error
+    assert raised is not None
+    assert raised.status_code == 409
+    assert "already exists" in raised.message
+
+
 def test_users_endpoints_require_csrf(client, make_user) -> None:
     owner_session(client, make_user)
     response = client.post(

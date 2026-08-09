@@ -2,18 +2,28 @@
 
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { Suspense, useState, type FormEvent } from "react";
+import { Suspense, useEffect, useState, type FormEvent } from "react";
 import { api, errorDetail } from "@/lib/api";
 import { passwordPolicyError } from "@/lib/password";
 
 function ResetPasswordForm() {
   const searchParams = useSearchParams();
-  const token = searchParams.get("token") ?? "";
+  // Capture the token once into component memory; it is never written to
+  // browser storage or logs.
+  const [token] = useState(() => searchParams.get("token") ?? "");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    // Immediately drop the token from the visible URL and history entry so it
+    // cannot leak through the address bar, history, or referrers.
+    if (searchParams.get("token") !== null) {
+      window.history.replaceState(window.history.state, "", window.location.pathname);
+    }
+  }, [searchParams]);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

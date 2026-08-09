@@ -3,16 +3,23 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { PasswordChangeForm } from "@/components/password-change-form";
+import { useLogout } from "@/components/use-logout";
 import { api, type SessionData } from "@/lib/api";
 
 /**
  * Forced first-login password change. Users flagged with
  * must_change_password land here and cannot enter the CRM shell until the
  * change succeeds; the API rejects other protected actions regardless.
+ * Logging out remains available.
  */
 export default function ChangePasswordPage() {
   const router = useRouter();
   const [session, setSession] = useState<SessionData | null>(null);
+  const {
+    logout,
+    pending: loggingOut,
+    error: logoutError,
+  } = useLogout(session?.csrf_token ?? null);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,6 +63,14 @@ export default function ChangePasswordPage() {
           submitLabel="Set new password"
           onSuccess={() => router.replace("/")}
         />
+        {logoutError !== null && (
+          <p className="form-error" role="alert">
+            {logoutError}
+          </p>
+        )}
+        <button type="button" onClick={() => void logout()} disabled={loggingOut}>
+          {loggingOut ? "Logging out…" : "Log out"}
+        </button>
       </div>
     </main>
   );
