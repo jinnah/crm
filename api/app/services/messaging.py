@@ -28,6 +28,19 @@ MAX_SMS_LENGTH = 1600  # Twilio's limit for concatenated SMS.
 # The only variables templates may use. Unknown variables are rejected so a
 # typo never ships a literal "{{whatever}}" to a customer.
 TEMPLATE_VARIABLES = ("lead_name", "business_name", "source", "lead_id")
+
+# Additional variables the appointment templates may use.
+APPOINTMENT_TEMPLATE_VARIABLES = (
+    "lead_name",
+    "business_name",
+    "appointment_date",
+    "appointment_time",
+    "assigned_staff",
+    "appointment_subject",
+    "booking_reference",
+)
+
+
 _VARIABLE_PATTERN = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
 
 
@@ -130,6 +143,27 @@ def validate_template(template: str) -> str:
     if len(template) > MAX_SMS_LENGTH:
         raise MessagingError(f"Template must be at most {MAX_SMS_LENGTH} characters.")
     return template
+
+
+def validate_appointment_template(template: str) -> str:
+    unknown = set(_VARIABLE_PATTERN.findall(template)) - set(APPOINTMENT_TEMPLATE_VARIABLES)
+    if unknown:
+        raise MessagingError(
+            "Unknown template variables: "
+            + ", ".join(sorted(unknown))
+            + ". Allowed: "
+            + ", ".join(APPOINTMENT_TEMPLATE_VARIABLES)
+        )
+    if not template.strip():
+        raise MessagingError("Template cannot be empty.")
+    if len(template) > MAX_SMS_LENGTH:
+        raise MessagingError(f"Template must be at most {MAX_SMS_LENGTH} characters.")
+    return template
+
+
+def render_with(template: str, values: dict[str, str]) -> str:
+    """Substitute a caller-supplied variable map (appointment templates)."""
+    return _VARIABLE_PATTERN.sub(lambda match: values.get(match.group(1), ""), template)
 
 
 def render_template(template: str, lead: Lead, settings_row: CommunicationSettings) -> str:
@@ -258,6 +292,7 @@ PURPOSE_LABELS = {
     "human_reply": "SMS sent",
     "auto_acknowledgment": "Automated acknowledgment",
     "staff_alert": "New-lead alert",
+    "appointment": "Appointment message",
 }
 
 

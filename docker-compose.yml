@@ -55,6 +55,9 @@ services:
       # Server-side only: never exposed to the browser.
       N8N_FORM_WEBHOOK_URL: ${N8N_FORM_WEBHOOK_URL:-http://n8n:5678/webhook/web-form}
       FORM_SHARED_SECRET: ${FORM_SHARED_SECRET:-}
+      # The public booking page reaches the CRM only through the server, so the
+      # API itself never has to be published to the internet.
+      CRM_API_URL: ${CRM_API_URL:-http://api:8000}
     ports:
       - "3000:3000"
     depends_on:

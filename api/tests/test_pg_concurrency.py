@@ -10,7 +10,7 @@ import os
 import threading
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
 from app.models import Base, User
@@ -28,11 +28,31 @@ pytestmark = pytest.mark.skipif(
 TEMP_PASSWORD = "temporary password 123"
 
 
+def apply_postgres_only_constraints(engine) -> None:
+    """Mirror the DDL that create_all cannot express.
+
+    The appointment exclusion constraint is installed by the Alembic migration
+    as raw PostgreSQL DDL, so a metadata-built schema would silently lack the
+    database-level guarantee these tests exist to prove.
+    """
+    with engine.begin() as connection:
+        connection.execute(text("CREATE EXTENSION IF NOT EXISTS btree_gist"))
+        connection.execute(
+            text(
+                "ALTER TABLE appointments ADD CONSTRAINT ex_appointments_no_overlap "
+                "EXCLUDE USING gist ("
+                "assigned_to WITH =, tstzrange(start_at, end_at) WITH &&"
+                ") WHERE (status = 'scheduled' AND assigned_to IS NOT NULL)"
+            )
+        )
+
+
 @pytest.fixture()
 def pg_session_factory():
     engine = create_engine(TEST_POSTGRES_URL)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)  # test-only; the app itself migrates via Alembic
+    apply_postgres_only_constraints(engine)
     yield sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     Base.metadata.drop_all(engine)
     engine.dispose()
@@ -492,4 +512,215 @@ def test_recovered_message_is_not_resent_automatically(pg_session_factory) -> No
     )
     assert stranded.status == "unknown"
     assert stranded.error_code == "abandoned"
+    check.close()
+
+
+# --- appointment scheduling and reminders -------------------------------
+
+
+def seed_scheduling_settings(session):
+    """Round-the-clock availability so a fixed future instant is always bookable."""
+    from app.services.messaging import get_settings_row
+
+    row = get_settings_row(session)
+    row.business_timezone = "UTC"
+    row.min_booking_notice_minutes = 0
+    row.max_booking_days_ahead = 365
+    row.buffer_before_minutes = 0
+    row.buffer_after_minutes = 0
+    row.business_hours = {
+        key: [["00:00", "23:59"]] for key in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    session.commit()
+    return row
+
+
+def seed_appointment_lead(session, phone="+15550600001"):
+    from app.models import Lead
+
+    lead = Lead(name="Concurrent Booking", phone=phone, source="manual")
+    session.add(lead)
+    session.commit()
+    return lead
+
+
+def test_concurrent_overlapping_bookings_cannot_both_succeed(pg_session_factory) -> None:
+    """Two requests for the same staff member at overlapping times: one wins,
+    the other is told the slot is gone rather than double-booking."""
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from app.models import Appointment, Lead, utcnow
+    from app.services import scheduling
+    from app.services.messaging import get_settings_row
+
+    setup = pg_session_factory()
+    staff = make_owner(setup, "tech@example.com")
+    lead = seed_appointment_lead(setup)
+    seed_scheduling_settings(setup)
+    setup.close()
+
+    start = (utcnow() + timedelta(days=3)).replace(microsecond=0)
+    barrier = threading.Barrier(2)
+    booked: list[str] = []
+    conflicts: list[int] = []
+    errors: list[Exception] = []
+
+    def book(offset_minutes: int) -> None:
+        session = pg_session_factory()
+        try:
+            settings_row = get_settings_row(session)
+            target = session.get(Lead, lead.id)
+            barrier.wait(timeout=5)
+            scheduling.lock_staff_calendar(session, staff.id)
+            appointment = scheduling.create_appointment(
+                session,
+                None,
+                target,
+                settings_row,
+                start_at=start + timedelta(minutes=offset_minutes),
+                duration_minutes=60,
+                staff_id=staff.id,
+            )
+            session.commit()
+            booked.append(str(appointment.id))
+        except scheduling.SlotUnavailableError as error:
+            session.rollback()
+            conflicts.append(error.status_code)
+        except Exception as error:  # pragma: no cover - failure diagnostics
+            session.rollback()
+            errors.append(error)
+        finally:
+            session.close()
+
+    threads = [
+        threading.Thread(target=book, args=(0,)),
+        threading.Thread(target=book, args=(30,)),  # overlaps the first by half an hour
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert len(booked) == 1, f"exactly one booking may win: {booked} {conflicts}"
+    assert conflicts == [409], f"the loser must get a conflict, got {conflicts}"
+
+    check = pg_session_factory()
+    assert check.scalar(func.count(Appointment.id)) == 1
+    check.close()
+
+
+def test_database_refuses_overlap_even_without_the_application_check(pg_session_factory) -> None:
+    """The exclusion constraint is the last line of defence: an insert that
+    bypasses the service layer entirely is still rejected."""
+    from datetime import timedelta
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import Appointment, utcnow
+
+    setup = pg_session_factory()
+    staff = make_owner(setup, "tech@example.com")
+    lead = seed_appointment_lead(setup, "+15550600005")
+    start = (utcnow() + timedelta(days=4)).replace(microsecond=0)
+
+    def raw_appointment(offset_minutes: int, subject: str) -> Appointment:
+        return Appointment(
+            lead_id=lead.id,
+            assigned_to=staff.id,
+            subject=subject,
+            start_at=start + timedelta(minutes=offset_minutes),
+            end_at=start + timedelta(minutes=offset_minutes + 60),
+            timezone="UTC",
+            status="scheduled",
+            origin="staff",
+        )
+
+    setup.add(raw_appointment(0, "First"))
+    setup.commit()
+
+    setup.add(raw_appointment(30, "Overlapping"))
+    with pytest.raises(IntegrityError):
+        setup.commit()
+    setup.rollback()
+
+    # A canceled appointment releases its time, so the same window reopens.
+    first = setup.scalar(select(Appointment))
+    first.status = "canceled"
+    setup.commit()
+    setup.add(raw_appointment(30, "After cancellation"))
+    setup.commit()
+    setup.close()
+
+
+def test_concurrent_notification_claims_contact_the_provider_once(pg_session_factory) -> None:
+    """Overlapping scheduled dispatch runs must not send the same reminder twice."""
+    from datetime import timedelta
+
+    from app.config import get_settings
+    from app.models import Appointment, AppointmentNotification, utcnow
+    from app.services import appointment_notifications as notifications
+
+    setup = pg_session_factory()
+    seed_scheduling_settings(setup)
+    lead = seed_appointment_lead(setup, "+15550600002")
+    start = utcnow() + timedelta(days=2)
+    appointment = Appointment(
+        lead_id=lead.id,
+        subject="Reminder target",
+        start_at=start,
+        end_at=start + timedelta(hours=1),
+        timezone="UTC",
+        status="scheduled",
+        origin="staff",
+    )
+    setup.add(appointment)
+    setup.commit()
+    setup.add(
+        AppointmentNotification(
+            appointment_id=appointment.id,
+            type="reminder",
+            occurrence="1:1",
+            scheduled_at=utcnow() - timedelta(minutes=1),
+            state="pending",
+            idempotency_key_digest="digest-concurrent-reminder",
+        )
+    )
+    setup.commit()
+    setup.close()
+
+    sender = _CountingSender(delay=0.6)
+    settings = get_settings()
+    barrier = threading.Barrier(2)
+    claims: list[int] = []
+    errors: list[Exception] = []
+
+    def dispatch() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            counts = notifications.dispatch_due(session, settings, sender)
+            claims.append(counts["claimed"])
+        except Exception as error:  # pragma: no cover - failure diagnostics
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=dispatch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert sum(claims) == 1, f"the reminder may be claimed once only: {claims}"
+    assert len(sender.sent) == 1, "the provider must be contacted exactly once"
+
+    check = pg_session_factory()
+    row = check.scalar(select(AppointmentNotification))
+    assert row.state == "sent"
+    assert row.outbound_message_id is not None
     check.close()

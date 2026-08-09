@@ -1,0 +1,531 @@
+{
+  "name": "Appointment Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "reminder-schedule",
+      "name": "Every Five Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Counts only: what the dispatch did, never who it was about. No phone\n// number, name, appointment subject or token is emitted here.\nconst response = $input.all()[0].json;\nconst body = response.body && typeof response.body === 'object' ? response.body : {};\nreturn [{\n  json: {\n    outcome: 'dispatched',\n    claimed: Number(body.claimed || 0),\n    sent: Number(body.sent || 0),\n    failed: Number(body.failed || 0),\n    unknown: Number(body.unknown || 0),\n    suppressed: Number(body.suppressed || 0),\n    recovered: Number(body.recovered || 0),\n    ran_at: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "code-summarize-dispatch",
+      "name": "Summarize Dispatch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2540,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The CRM could not be reached this run. Nothing is resent from here: the\n// notifications are still pending in the CRM and the next run will claim\n// them, so giving up quietly is safe and never duplicates a message.\nconst item = $input.all()[0].json;\nreturn [{\n  json: {\n    outcome: 'not_dispatched',\n    status: Number(item.status || 0) || null,\n    message: String(item.message || 'The CRM did not accept the dispatch.').slice(0, 300),\n    ran_at: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "code-give-up-until-next-run",
+      "name": "Give Up Until Next Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2540,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/appointment-notifications/dispatch?limit=25",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "crm-dispatch-1",
+      "name": "CRM Dispatch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every attempt is classified. Output carries the outcome and a\n// bounded message only — never the dispatch body.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'The CRM rejected the dispatch (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry' } }];\n"
+      },
+      "id": "code-classify-dispatch",
+      "name": "Classify Dispatch",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-dispatch-1",
+      "name": "Route Dispatch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        620,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/appointment-notifications/dispatch?limit=25",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "crm-dispatch-2",
+      "name": "CRM Dispatch 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every attempt is classified. Output carries the outcome and a\n// bounded message only — never the dispatch body.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'The CRM rejected the dispatch (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry' } }];\n"
+      },
+      "id": "code-classify-dispatch-2",
+      "name": "Classify Dispatch 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-dispatch-2",
+      "name": "Route Dispatch 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/appointment-notifications/dispatch?limit=25",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "crm-dispatch-3",
+      "name": "CRM Dispatch 3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1460,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every attempt is classified. Output carries the outcome and a\n// bounded message only — never the dispatch body.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'The CRM rejected the dispatch (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'exhausted', status: 503, message: 'CRM unavailable after 3 attempts' } }];\n"
+      },
+      "id": "code-classify-dispatch-3",
+      "name": "Classify Dispatch 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-dispatch-3",
+      "name": "Route Dispatch 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1860,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "CRM Dispatch": {
+      "main": [
+        [
+          {
+            "node": "Classify Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Dispatch": {
+      "main": [
+        [
+          {
+            "node": "Route Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Dispatch": {
+      "main": [
+        [
+          {
+            "node": "Summarize Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Dispatch 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Next Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Dispatch 2": {
+      "main": [
+        [
+          {
+            "node": "Classify Dispatch 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Dispatch 2": {
+      "main": [
+        [
+          {
+            "node": "Route Dispatch 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Dispatch 2": {
+      "main": [
+        [
+          {
+            "node": "Summarize Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Dispatch 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Next Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Dispatch 3": {
+      "main": [
+        [
+          {
+            "node": "Classify Dispatch 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Dispatch 3": {
+      "main": [
+        [
+          {
+            "node": "Route Dispatch 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Dispatch 3": {
+      "main": [
+        [
+          {
+            "node": "Summarize Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Next Run",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Next Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every Five Minutes": {
+      "main": [
+        [
+          {
+            "node": "CRM Dispatch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "active": false,
+  "pinData": {}
+}

@@ -126,7 +126,50 @@ def attention_queue(user: FullyAuthedUserDep, db: DbDep) -> AttentionQueueOut:
         unassigned=_serialize_many(db, groups["unassigned"]),
         needs_review=_serialize_many(db, groups["needs_review"]),
         unresponded=_serialize_many(db, groups["unresponded"]),
+        **_appointment_attention(db, user),
     )
+
+
+def _appointment_attention(db: Session, user: User) -> dict:
+    """Scheduling states that need action, shaped for the attention queue."""
+    from app.api.v1.appointments import appointment_attention
+    from app.api.v1.schemas import AttentionAppointmentOut
+    from app.models import Appointment
+
+    settings_row = messaging.get_settings_row(db)
+    groups = appointment_attention(db, user, settings_row)
+
+    def shape(appointment, detail=None):
+        lead = db.get(Lead, appointment.lead_id)
+        return AttentionAppointmentOut(
+            id=appointment.id,
+            lead_id=appointment.lead_id,
+            lead_name=(lead.name or lead.email or lead.phone) if lead is not None else None,
+            subject=appointment.subject,
+            start_at=appointment.start_at,
+            timezone=appointment.timezone,
+            status=appointment.status,
+            detail=detail,
+        )
+
+    def shape_notification(notification):
+        appointment = db.get(Appointment, notification.appointment_id)
+        if appointment is None:
+            return None
+        return shape(
+            appointment,
+            f"{notification.type} message {notification.state}"
+            + (f": {notification.failure_message}" if notification.failure_message else ""),
+        )
+
+    failed = [shape_notification(row) for row in groups["failed_notifications"]]
+    unknown = [shape_notification(row) for row in groups["unknown_notifications"]]
+    return {
+        "appointments_overdue": [shape(item, "Needs a disposition") for item in groups["overdue"]],
+        "appointments_upcoming": [shape(item) for item in groups["upcoming"]],
+        "appointment_messages_failed": [item for item in failed if item is not None],
+        "appointment_messages_unknown": [item for item in unknown if item is not None],
+    }
 
 
 @router.get("/assignable-users", response_model=list[AssignableUserOut])

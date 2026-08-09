@@ -150,12 +150,27 @@ class ActivityOut(BaseModel):
     created_at: datetime
 
 
+class AttentionAppointmentOut(BaseModel):
+    id: uuid.UUID
+    lead_id: uuid.UUID
+    lead_name: str | None
+    subject: str
+    start_at: datetime
+    timezone: str
+    status: str
+    detail: str | None = None
+
+
 class AttentionQueueOut(BaseModel):
     overdue: list[LeadOut]
     due_today: list[LeadOut]
     unassigned: list[LeadOut]
     needs_review: list[LeadOut]
     unresponded: list[LeadOut] = []
+    appointments_overdue: list[AttentionAppointmentOut] = []
+    appointments_upcoming: list[AttentionAppointmentOut] = []
+    appointment_messages_failed: list[AttentionAppointmentOut] = []
+    appointment_messages_unknown: list[AttentionAppointmentOut] = []
 
 
 class CustomFieldOut(BaseModel):
@@ -286,3 +301,200 @@ class PublicFormInfoOut(BaseModel):
     form_title: str
     form_intro: str
     business_name: str
+
+
+# --- Scheduling ----------------------------------------------------------
+
+
+class AppointmentOut(BaseModel):
+    id: uuid.UUID
+    lead_id: uuid.UUID
+    lead_name: str | None = None
+    assigned_to: uuid.UUID | None
+    assignee_email: str | None
+    subject: str
+    notes: str
+    start_at: datetime
+    end_at: datetime
+    timezone: str
+    status: str
+    origin: str
+    booking_reference: str | None
+    cancellation_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CreateAppointmentRequest(BaseModel):
+    start_at: datetime
+    duration_minutes: int | None = Field(default=None, ge=1, le=720)
+    subject: str = Field(default="Appointment", max_length=200)
+    notes: str = Field(default="", max_length=2000)
+    assigned_to: uuid.UUID | None = None
+
+
+class RescheduleAppointmentRequest(BaseModel):
+    start_at: datetime
+    duration_minutes: int | None = Field(default=None, ge=1, le=720)
+
+
+class AppointmentDispositionRequest(BaseModel):
+    status: str
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class AvailabilityOut(BaseModel):
+    date: str
+    timezone: str
+    duration_minutes: int
+    slots: list[datetime]
+
+
+class BookingLinkOut(BaseModel):
+    id: uuid.UUID
+    lead_id: uuid.UUID
+    assigned_to: uuid.UUID | None
+    expires_at: datetime
+    revoked_at: datetime | None
+    duration_minutes: int | None
+    created_at: datetime
+    last_used_at: datetime | None
+    # Present only in the response that creates or regenerates the link.
+    url: str | None = None
+
+
+class CreateBookingLinkRequest(BaseModel):
+    assigned_to: uuid.UUID | None = None
+    duration_minutes: int | None = Field(default=None, ge=1, le=720)
+    ttl_days: int = Field(default=14, ge=1, le=90)
+
+
+class PublicBookingInfoOut(BaseModel):
+    """Everything the public booking page may know. No lead identifiers, no
+    contact details, no CRM data."""
+
+    business_name: str
+    intro: str
+    staff_display_name: str | None
+    duration_minutes: int
+    timezone: str
+    days: list[AvailabilityOut]
+
+
+class PublicBookingRequest(BaseModel):
+    start_at: datetime
+    booking_key: str = Field(min_length=8, max_length=200)
+    website: str | None = Field(default=None, max_length=100)  # honeypot
+
+
+class PublicBookingResultOut(BaseModel):
+    booking_reference: str
+    start_at: datetime
+    end_at: datetime
+    timezone: str
+    manage_token: str | None = None
+    duplicate: bool = False
+
+
+class PublicAppointmentOut(BaseModel):
+    """What the holder of an appointment's manage capability may see.
+
+    Deliberately excludes the internal subject, notes, lead identifiers and
+    every contact detail — knowing the capability is not the same as being
+    given access to the CRM record.
+    """
+
+    business_name: str
+    staff_display_name: str | None
+    booking_reference: str
+    start_at: datetime
+    end_at: datetime
+    timezone: str
+    status: str
+    can_change: bool
+    days: list[AvailabilityOut] = []
+
+
+class PublicRescheduleRequest(BaseModel):
+    start_at: datetime
+    website: str | None = Field(default=None, max_length=100)  # honeypot
+
+
+class AppointmentNotificationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    appointment_id: uuid.UUID
+    type: str
+    occurrence: str
+    scheduled_at: datetime
+    state: str
+    failure_message: str | None
+
+
+class DispatchResultOut(BaseModel):
+    claimed: int
+    sent: int
+    failed: int
+    unknown: int
+    suppressed: int
+    recovered: int
+
+
+class SchedulingSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    business_timezone: str
+    appointment_duration_minutes: int
+    min_booking_notice_minutes: int
+    max_booking_days_ahead: int
+    buffer_before_minutes: int
+    buffer_after_minutes: int
+    self_booking_enabled: bool
+    appointment_confirmation_enabled: bool
+    appointment_reminder_enabled: bool
+    reminder_offset_minutes: int
+    second_reminder_offset_minutes: int | None
+    upcoming_window_hours: int
+    confirmation_template: str
+    reminder_template: str
+    appointment_canceled_template: str
+    appointment_rescheduled_template: str
+    business_hours: dict[str, Any] | None
+
+
+class SchedulingBasicsOut(BaseModel):
+    """What any staff member needs in order to schedule.
+
+    Deliberately excludes message templates and the notification configuration,
+    which stay owner-only.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    business_timezone: str
+    appointment_duration_minutes: int
+    min_booking_notice_minutes: int
+    max_booking_days_ahead: int
+    self_booking_enabled: bool
+    business_hours: dict[str, Any] | None
+
+
+class UpdateSchedulingSettingsRequest(BaseModel):
+    business_timezone: str | None = Field(default=None, max_length=64)
+    appointment_duration_minutes: int | None = Field(default=None, ge=5, le=720)
+    min_booking_notice_minutes: int | None = Field(default=None, ge=0, le=43_200)
+    max_booking_days_ahead: int | None = Field(default=None, ge=1, le=365)
+    buffer_before_minutes: int | None = Field(default=None, ge=0, le=240)
+    buffer_after_minutes: int | None = Field(default=None, ge=0, le=240)
+    self_booking_enabled: bool | None = None
+    appointment_confirmation_enabled: bool | None = None
+    appointment_reminder_enabled: bool | None = None
+    reminder_offset_minutes: int | None = Field(default=None, ge=5, le=20_160)
+    second_reminder_offset_minutes: int | None = Field(default=None, ge=5, le=20_160)
+    upcoming_window_hours: int | None = Field(default=None, ge=1, le=336)
+    confirmation_template: str | None = Field(default=None, max_length=1600)
+    reminder_template: str | None = Field(default=None, max_length=1600)
+    appointment_canceled_template: str | None = Field(default=None, max_length=1600)
+    appointment_rescheduled_template: str | None = Field(default=None, max_length=1600)
+    business_hours: dict[str, Any] | None = None

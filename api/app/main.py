@@ -3,6 +3,8 @@ from collections.abc import Awaitable, Callable
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.v1.appointments import lead_router as appointment_lead_router
+from app.api.v1.appointments import router as appointments_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.custom_fields import router as custom_fields_router
 from app.api.v1.deps import CSRF_HEADER
@@ -10,6 +12,8 @@ from app.api.v1.health import router as health_router
 from app.api.v1.inbound import MAX_BODY_BYTES
 from app.api.v1.inbound import router as inbound_router
 from app.api.v1.leads import router as leads_router
+from app.api.v1.public_booking import manage_router as public_appointment_router
+from app.api.v1.public_booking import router as public_booking_router
 from app.api.v1.settings import public_router as public_router
 from app.api.v1.settings import router as settings_router
 from app.api.v1.users import router as users_router
@@ -63,6 +67,10 @@ def create_app() -> FastAPI:
     app.include_router(inbound_router, prefix="/api/v1")
     app.include_router(settings_router, prefix="/api/v1")
     app.include_router(public_router, prefix="/api/v1")
+    app.include_router(appointments_router, prefix="/api/v1")
+    app.include_router(appointment_lead_router, prefix="/api/v1")
+    app.include_router(public_booking_router, prefix="/api/v1")
+    app.include_router(public_appointment_router, prefix="/api/v1")
     return app
 
 

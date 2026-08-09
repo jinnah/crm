@@ -5,13 +5,14 @@ from fastapi import APIRouter, Header, HTTPException, Request
 
 from app.api.v1.deps import DbDep, SettingsDep, get_sms_sender
 from app.api.v1.schemas import (
+    DispatchResultOut,
     InboundEventRequest,
     InboundEventResponse,
     MessageStatusRequest,
     MessageStatusResponse,
 )
 from app.security.tokens import constant_time_equals
-from app.services import messaging
+from app.services import appointment_notifications, messaging
 from app.services.inbound import process_inbound_event
 
 logger = logging.getLogger(__name__)
@@ -81,3 +82,26 @@ def _require_inbound_key(request: Request, settings) -> None:
     configured = settings.inbound_api_key
     if not configured or not provided or not constant_time_equals(provided, configured):
         raise HTTPException(status_code=401, detail="Invalid API key.")
+
+
+@router.post("/appointment-notifications/dispatch", response_model=DispatchResultOut)
+def dispatch_appointment_notifications(
+    request: Request,
+    db: DbDep,
+    settings: SettingsDep,
+    limit: int = 25,
+) -> DispatchResultOut:
+    """Called on a schedule by n8n. The CRM owns the claiming and sending;
+    n8n never touches PostgreSQL."""
+    _require_inbound_key(request, settings)
+    counts = appointment_notifications.dispatch_due(
+        db, settings, get_sms_sender(request), limit=max(1, min(limit, 100))
+    )
+    return DispatchResultOut(
+        claimed=counts.get("claimed", 0),
+        sent=counts.get("sent", 0),
+        failed=counts.get("failed", 0),
+        unknown=counts.get("unknown", 0),
+        suppressed=counts.get("suppressed", 0),
+        recovered=counts.get("recovered", 0),
+    )

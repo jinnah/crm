@@ -399,6 +399,7 @@ describe("workflow hygiene", () => {
 
   test("covers every expected workflow", () => {
     expect(files.sort()).toEqual([
+      "appointment-reminders.json",
       "error-handler.json",
       "meta-messenger.json",
       "meta-whatsapp.json",
@@ -795,5 +796,135 @@ describe("twilio delivery status honesty", () => {
       },
     ]);
     expect(malformed.json).toMatchObject({ reject: true, status: 422 });
+  });
+});
+
+describe("appointment reminder dispatch", () => {
+  const workflow = loadWorkflow("appointment-reminders.json");
+  const classifiers = ["Classify Dispatch", "Classify Dispatch 2", "Classify Dispatch 3"];
+
+  function classify(nodeName: string, statusCode: number, body: unknown = {}) {
+    const node = workflow.nodes.find((candidate) => candidate.name === nodeName)!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    return fn({ all: () => [{ json: { statusCode, body } }] }, ENV, nodeRequire, Buffer) as Array<{
+      json: Record<string, unknown>;
+    }>;
+  }
+
+  test("runs on a schedule rather than a webhook", () => {
+    const trigger = workflow.nodes.find((node) => node.type.endsWith("scheduleTrigger"));
+    expect(trigger).toBeDefined();
+    expect(workflow.nodes.some((node) => node.type.endsWith("webhook"))).toBe(false);
+  });
+
+  test("asks the CRM to dispatch, using the key from the environment", () => {
+    const attempts = workflow.nodes.filter((node) => node.name.startsWith("CRM Dispatch"));
+    expect(attempts.length).toBe(3);
+    for (const attempt of attempts) {
+      expect(String(attempt.parameters.url)).toContain(
+        "/api/v1/inbound/appointment-notifications/dispatch",
+      );
+      expect(String(attempt.parameters.url)).toContain("$env.CRM_API_URL");
+      const headers = JSON.stringify(attempt.parameters.headerParameters);
+      expect(headers).toContain("$env.CRM_INBOUND_API_KEY");
+      expect(headers).not.toMatch(/[0-9a-f]{32}/);
+      // No blanket retry: only the classifier decides what may be tried again.
+      expect(attempt.retryOnFail ?? false).toBe(false);
+    }
+  });
+
+  test("never talks to the database or a messaging provider itself", () => {
+    const serialized = JSON.stringify(workflow);
+    expect(serialized).not.toMatch(/postgres|psql|:5432/i);
+    expect(serialized).not.toMatch(/api\.twilio\.com|graph\.facebook\.com/);
+  });
+
+  test("a permanent rejection is never retried, on any attempt", () => {
+    for (const nodeName of classifiers) {
+      for (const status of [400, 401, 403, 404, 409, 413, 415, 422]) {
+        const [result] = classify(nodeName, status);
+        expect(result.json.outcome, `${nodeName} status ${status}`).toBe("permanent");
+      }
+    }
+  });
+
+  test("temporary failures retry and then give up until the next run", () => {
+    for (const status of [0, 429, 500, 502, 503, 504]) {
+      expect(classify("Classify Dispatch", status)[0].json.outcome).toBe("retry");
+      expect(classify("Classify Dispatch 2", status)[0].json.outcome).toBe("retry");
+      expect(classify("Classify Dispatch 3", status)[0].json).toMatchObject({
+        outcome: "exhausted",
+        status: 503,
+      });
+    }
+  });
+
+  test("giving up sends nothing itself — the CRM still holds the pending work", () => {
+    const node = workflow.nodes.find((candidate) => candidate.name === "Give Up Until Next Run")!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    const [result] = fn(
+      { all: () => [{ json: { outcome: "exhausted", status: 503, message: "CRM unavailable" } }] },
+      ENV,
+      nodeRequire,
+      Buffer,
+    ) as Array<{ json: Record<string, unknown> }>;
+    expect(result.json.outcome).toBe("not_dispatched");
+    // It is a terminal node: nothing downstream can resend from here.
+    const connections = workflow.connections as Record<
+      string,
+      { main: Array<Array<{ node: string }>> }
+    >;
+    expect(connections["Give Up Until Next Run"]).toBeUndefined();
+  });
+
+  test("the run summary carries counts only, never customer data", () => {
+    const node = workflow.nodes.find((candidate) => candidate.name === "Summarize Dispatch")!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    const [result] = fn(
+      {
+        all: () => [
+          {
+            json: {
+              statusCode: 200,
+              body: {
+                claimed: 2,
+                sent: 1,
+                failed: 0,
+                unknown: 1,
+                suppressed: 0,
+                recovered: 0,
+                // Anything else the CRM might add must not leak into the log.
+                lead_phone: "+15550100001",
+                lead_name: "Pat Customer",
+              },
+            },
+          },
+        ],
+      },
+      ENV,
+      nodeRequire,
+      Buffer,
+    ) as Array<{ json: Record<string, unknown> }>;
+    expect(result.json).toMatchObject({ outcome: "dispatched", claimed: 2, sent: 1, unknown: 1 });
+    const serialized = JSON.stringify(result.json);
+    expect(serialized).not.toContain("+1555");
+    expect(serialized).not.toContain("Pat Customer");
+  });
+
+  test("classifier output exposes no key or dispatch body", () => {
+    for (const nodeName of classifiers) {
+      for (const status of [0, 422, 500]) {
+        const [result] = classify(nodeName, status, { sent: 3, lead_phone: "+15550100001" });
+        const serialized = JSON.stringify(result.json);
+        expect(serialized).not.toContain("test-inbound-key-not-real");
+        expect(serialized).not.toContain("+1555");
+        expect(
+          Object.keys(result.json).every((key) => ["outcome", "status", "message"].includes(key)),
+        ).toBe(true);
+      }
+    }
   });
 });

@@ -39,11 +39,26 @@ ACTIVITY_TYPES = (
     "outbound_message",
     "message_status",
     "contacted_outside_crm",
+    "appointment_scheduled",
+    "appointment_rescheduled",
+    "appointment_canceled",
+    "appointment_completed",
+    "appointment_no_show",
+    "booking_link_created",
+    "booking_link_revoked",
 )
 
 # Outbound message purposes and delivery states.
-MESSAGE_PURPOSES = ("human_reply", "auto_acknowledgment", "staff_alert")
+MESSAGE_PURPOSES = ("human_reply", "auto_acknowledgment", "staff_alert", "appointment")
 MESSAGE_STATUSES = ("pending", "submitted", "delivered", "failed", "unknown")
+
+# Appointment lifecycle. Appointments are never hard-deleted.
+APPOINTMENT_STATUSES = ("scheduled", "completed", "canceled", "no_show")
+APPOINTMENT_ORIGINS = ("staff", "customer")
+
+# Appointment notification kinds and their durable delivery state.
+NOTIFICATION_TYPES = ("confirmation", "reminder", "rescheduled", "canceled")
+NOTIFICATION_STATES = ("pending", "claimed", "sent", "failed", "unknown", "suppressed")
 
 
 def utcnow() -> datetime:
@@ -282,6 +297,52 @@ class CommunicationSettings(Base):
     )
     alert_destination_phone: Mapped[str | None] = mapped_column(String(32))
     response_target_minutes: Mapped[int] = mapped_column(Integer, default=5)
+
+    # --- Scheduling -----------------------------------------------------
+    # IANA name; every stored timestamp is UTC, this is how they are shown.
+    business_timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    appointment_duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
+    min_booking_notice_minutes: Mapped[int] = mapped_column(Integer, default=120)
+    max_booking_days_ahead: Mapped[int] = mapped_column(Integer, default=60)
+    buffer_before_minutes: Mapped[int] = mapped_column(Integer, default=0)
+    buffer_after_minutes: Mapped[int] = mapped_column(Integer, default=15)
+    self_booking_enabled: Mapped[bool] = mapped_column(default=False)
+    appointment_confirmation_enabled: Mapped[bool] = mapped_column(default=False)
+    appointment_reminder_enabled: Mapped[bool] = mapped_column(default=False)
+    # Up to two reminder offsets, in minutes before the appointment start.
+    reminder_offset_minutes: Mapped[int] = mapped_column(Integer, default=1440)
+    second_reminder_offset_minutes: Mapped[int | None] = mapped_column(Integer)
+    upcoming_window_hours: Mapped[int] = mapped_column(Integer, default=24)
+    confirmation_template: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Hi {{lead_name}}, your {{appointment_subject}} with {{business_name}} is booked "
+            "for {{appointment_date}} at {{appointment_time}}."
+        ),
+    )
+    reminder_template: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Reminder: {{business_name}} will see you on {{appointment_date}} at "
+            "{{appointment_time}}."
+        ),
+    )
+    appointment_canceled_template: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Your {{appointment_subject}} with {{business_name}} on {{appointment_date}} "
+            "has been canceled."
+        ),
+    )
+    appointment_rescheduled_template: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Your {{appointment_subject}} with {{business_name}} has moved to "
+            "{{appointment_date}} at {{appointment_time}}."
+        ),
+    )
+    # Weekday availability as {"mon": [["09:00", "17:00"]], ...} in business time.
+    business_hours: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
@@ -294,7 +355,7 @@ class OutboundMessage(Base):
     __tablename__ = "outbound_messages"
     __table_args__ = (
         CheckConstraint(
-            "purpose IN ('human_reply', 'auto_acknowledgment', 'staff_alert')",
+            "purpose IN ('human_reply', 'auto_acknowledgment', 'staff_alert', 'appointment')",
             name="ck_outbound_messages_purpose",
         ),
         CheckConstraint(
@@ -330,6 +391,130 @@ class OutboundMessage(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     author: Mapped[User | None] = relationship()
+
+
+class Appointment(Base):
+    """A scheduled visit. Never hard-deleted: cancellation is a status."""
+
+    __tablename__ = "appointments"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('scheduled', 'completed', 'canceled', 'no_show')",
+            name="ck_appointments_status",
+        ),
+        CheckConstraint("origin IN ('staff', 'customer')", name="ck_appointments_origin"),
+        CheckConstraint("end_at > start_at", name="ck_appointments_range"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True
+    )
+    assigned_to: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    subject: Mapped[str] = mapped_column(String(200), default="Appointment")
+    notes: Mapped[str] = mapped_column(Text, default="")
+    start_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    end_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    # The business time zone in force when this appointment was scheduled.
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    status: Mapped[str] = mapped_column(String(16), default="scheduled")
+    origin: Mapped[str] = mapped_column(String(16), default="staff")
+    booking_reference: Mapped[str | None] = mapped_column(String(24), unique=True)
+    # Opaque capability for customer-initiated reschedule/cancel; only its
+    # digest is stored, so knowing the appointment UUID grants nothing.
+    manage_token_digest: Mapped[str | None] = mapped_column(String(64), unique=True)
+    # Digest of the customer's booking idempotency key, so a repeated
+    # submission returns the original appointment instead of creating one.
+    booking_key_digest: Mapped[str | None] = mapped_column(String(64), unique=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    cancellation_reason: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    canceled_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    no_show_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    lead: Mapped["Lead"] = relationship()
+    assignee: Mapped["User | None"] = relationship(foreign_keys=[assigned_to])
+
+
+class BookingLink(Base):
+    """Revocable, expiring capability that lets one customer self-book."""
+
+    __tablename__ = "booking_links"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="CASCADE"), index=True
+    )
+    assigned_to: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # Only the keyed digest is stored; the raw token exists in the link alone.
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    duration_minutes: Mapped[int | None] = mapped_column(Integer)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    lead: Mapped["Lead"] = relationship()
+
+
+class AppointmentNotification(Base):
+    """Durable record of one appointment message occurrence.
+
+    (appointment, type, occurrence) is unique, so a confirmation or a given
+    reminder offset can only ever exist once per appointment.
+    """
+
+    __tablename__ = "appointment_notifications"
+    __table_args__ = (
+        UniqueConstraint(
+            "appointment_id", "type", "occurrence", name="uq_appointment_notifications"
+        ),
+        CheckConstraint(
+            "type IN ('confirmation', 'reminder', 'rescheduled', 'canceled')",
+            name="ck_appointment_notifications_type",
+        ),
+        CheckConstraint(
+            "state IN ('pending', 'claimed', 'sent', 'failed', 'unknown', 'suppressed')",
+            name="ck_appointment_notifications_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    appointment_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("appointments.id", ondelete="CASCADE"), index=True
+    )
+    type: Mapped[str] = mapped_column(String(16))
+    # Distinguishes reminder offsets and reschedule generations.
+    occurrence: Mapped[str] = mapped_column(String(64), default="1")
+    scheduled_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    state: Mapped[str] = mapped_column(String(16), default="pending")
+    outbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("outbound_messages.id", ondelete="SET NULL")
+    )
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    attempted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    failure_code: Mapped[str | None] = mapped_column(String(32))
+    failure_message: Mapped[str | None] = mapped_column(String(500))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    appointment: Mapped["Appointment"] = relationship()
 
 
 class InboundEvent(Base):
