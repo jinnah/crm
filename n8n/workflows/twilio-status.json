@@ -68,13 +68,13 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json.payload) }}",
         "options": {
+          "timeout": 15000,
           "response": {
             "response": {
               "fullResponse": true,
               "neverError": true
             }
-          },
-          "timeout": 15000
+          }
         }
       },
       "id": "crm-status-write",
@@ -85,10 +85,80 @@
         660,
         0
       ],
-      "retryOnFail": true,
-      "maxTries": 3,
-      "waitBetweenTries": 2000,
       "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Only a real CRM 2xx may become a 200 for Twilio. `matched: false` is a\n// normal 2xx result (an authenticated callback for a SID we do not track) and\n// counts as handled. Permanent 4xx are never retried; temporary problems are.\n// No CRM key, header or callback content is echoed.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\n\nconst response = $input.all()[0].json;\nconst payload = $('Normalize').first().json.payload;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'CRM rejected the status callback (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry', payload } }];\n"
+      },
+      "id": "code-classify-status",
+      "name": "Classify Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-outcome",
+      "name": "Route Outcome",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1100,
+        0
+      ]
     },
     {
       "parameters": {
@@ -101,8 +171,93 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
       "position": [
-        880,
-        0
+        1760,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/message-status",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.payload) }}",
+        "options": {
+          "timeout": 15000,
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          }
+        }
+      },
+      "id": "crm-status-retry",
+      "name": "CRM Status Retry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1320,
+        40
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Outcome of the bounded synchronous retries for the status callback.\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nreturn [{ json: { outcome: 'exhausted', status: 503,\n  message: 'CRM unavailable after retries' } }];\n"
+      },
+      "id": "code-classify-status-retry",
+      "name": "Classify Status Retry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json.outcome === 'success' ? {status: 'ok'} : {error: $json.message}) }}",
+        "options": {
+          "responseCode": "={{ $json.outcome === 'success' ? 200 : 503 }}"
+        }
+      },
+      "id": "respond-status-retry",
+      "name": "Respond Status Retry Result",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-status-failure",
+      "name": "Respond Status Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        220
       ]
     },
     {
@@ -119,7 +274,7 @@
       "typeVersion": 1,
       "position": [
         660,
-        220
+        240
       ]
     }
   ],
@@ -168,7 +323,65 @@
       "main": [
         [
           {
+            "node": "Classify Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Status": {
+      "main": [
+        [
+          {
+            "node": "Route Outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Outcome": {
+      "main": [
+        [
+          {
             "node": "Respond Status OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Status Retry",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Status Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Status Retry": {
+      "main": [
+        [
+          {
+            "node": "Classify Status Retry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Status Retry": {
+      "main": [
+        [
+          {
+            "node": "Respond Status Retry Result",
             "type": "main",
             "index": 0
           }

@@ -259,8 +259,15 @@ class CommunicationSettings(Base):
     """
 
     __tablename__ = "communication_settings"
+    __table_args__ = (
+        CheckConstraint("singleton = 'X'", name="ck_communication_settings_singleton"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Guarantees exactly one logical row: the value is fixed and unique, so a
+    # concurrent second insert loses on the unique constraint instead of
+    # creating a rival settings row.
+    singleton: Mapped[str] = mapped_column(String(1), default="X", unique=True)
     business_name: Mapped[str] = mapped_column(String(200), default="Our team")
     form_title: Mapped[str] = mapped_column(String(200), default="Request a quote")
     form_intro: Mapped[str] = mapped_column(Text, default="")

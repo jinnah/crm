@@ -341,3 +341,223 @@ def test_attention_queue_lists_overdue_unresponded(client, db, make_user, sms_se
     send_sms(client, headers, lead.id, key="overdue-key-01")
     queue = client.get("/api/v1/leads/attention", headers=headers).json()
     assert queue["unresponded"] == []
+
+
+def test_delivered_is_terminal_and_transitions_are_central(client, db, make_user, sms_sender):
+    """delivered must never walk back to submitted/failed/pending/unknown."""
+    from app.services.messaging import ALLOWED_STATUS_TRANSITIONS, transition_allowed
+
+    # The table is the single definition of what may change.
+    assert ALLOWED_STATUS_TRANSITIONS["delivered"] == frozenset()
+    for proposed in ("submitted", "failed", "pending", "unknown"):
+        assert transition_allowed("delivered", proposed) is False
+    assert transition_allowed("submitted", "delivered") is True
+    assert transition_allowed("submitted", "failed") is True
+    assert transition_allowed("unknown", "delivered") is True
+    assert transition_allowed("unknown", "failed") is True
+    assert transition_allowed("failed", "delivered") is False
+    assert transition_allowed("submitted", "submitted") is False
+
+    headers = owner_session(client, make_user)
+    lead = create_lead(client, headers).json()
+    message = send_sms(client, headers, lead["id"], key="terminal-key-01").json()
+    sid = message["provider_sid"]
+
+    def callback(status, **extra):
+        return client.post(
+            "/api/v1/inbound/message-status",
+            json={"provider_sid": sid, "status": status, **extra},
+            headers={"X-API-Key": TEST_INBOUND_KEY},
+        )
+
+    assert callback("delivered").json()["status"] == "delivered"
+    # The regression this test exists for: delivered -> failed stays delivered.
+    assert callback("failed", error_code="30008").json()["status"] == "delivered"
+    assert callback("undelivered").json()["status"] == "delivered"
+    assert callback("sent").json()["status"] == "delivered"
+
+    row = db.scalar(select(OutboundMessage).where(OutboundMessage.provider_sid == sid))
+    db.refresh(row)
+    assert row.status == "delivered"
+    assert row.failed_at is None
+
+    status_activities = [
+        activity
+        for activity in db.scalars(select(LeadActivity))
+        if activity.type == "message_status"
+    ]
+    assert len(status_activities) == 1  # no duplicates from repeated callbacks
+
+
+def test_out_of_order_callbacks_do_not_duplicate_activities(client, db, make_user, sms_sender):
+    headers = owner_session(client, make_user)
+    lead = create_lead(client, headers).json()
+    message = send_sms(client, headers, lead["id"], key="ooo-key-000001").json()
+    sid = message["provider_sid"]
+
+    for status in ("delivered", "sent", "queued", "delivered", "sent"):
+        client.post(
+            "/api/v1/inbound/message-status",
+            json={"provider_sid": sid, "status": status},
+            headers={"X-API-Key": TEST_INBOUND_KEY},
+        )
+    status_activities = [
+        activity
+        for activity in db.scalars(select(LeadActivity))
+        if activity.type == "message_status"
+    ]
+    assert len(status_activities) == 1
+
+
+class _FakeResponse:
+    def __init__(self, payload, status_code=200):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+def _sender_with(monkeypatch, behaviour):
+    """Build an N8nSmsSender whose HTTP call is replaced by `behaviour`."""
+    import httpx
+
+    from app.config import get_settings
+    from app.services.messaging import N8nSmsSender
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "n8n_send_url", "http://n8n.test/webhook/twilio-send")
+    monkeypatch.setattr(settings, "n8n_send_secret", "test-send-secret")
+    monkeypatch.setattr(httpx, "post", behaviour)
+    return N8nSmsSender(settings)
+
+
+def _dummy_message():
+    return OutboundMessage(
+        lead_id=uuid.uuid4(),
+        purpose="human_reply",
+        to_phone="+15550100001",
+        body="hi",
+        idempotency_key_digest="digest-classify",
+    )
+
+
+def test_transport_failure_is_unknown_not_failed(monkeypatch) -> None:
+    """A lost response may still have reached the provider."""
+    import httpx
+
+    def raise_transport(*args, **kwargs):
+        raise httpx.ConnectError("connection reset")
+
+    sender = _sender_with(monkeypatch, raise_transport)
+    assert sender.send(_dummy_message()).status == "unknown"
+
+
+def test_timeout_is_unknown(monkeypatch) -> None:
+    import httpx
+
+    def raise_timeout(*args, **kwargs):
+        raise httpx.ReadTimeout("timed out")
+
+    sender = _sender_with(monkeypatch, raise_timeout)
+    assert sender.send(_dummy_message()).status == "unknown"
+
+
+def test_send_outcomes_are_classified_conservatively(monkeypatch) -> None:
+    cases = [
+        ({"status": "submitted", "sid": "SMok0001"}, 200, "submitted"),
+        (
+            {"status": "failed", "error_code": "21610", "error_message": "Unsubscribed"},
+            200,
+            "failed",
+        ),
+        ({"status": "unknown", "error_code": "no_sid"}, 200, "unknown"),
+        ({"status": "submitted"}, 200, "unknown"),  # nominal success without a SID
+        (None, 200, "unknown"),  # unreadable body
+        ({"status": "submitted", "sid": "SMx"}, 500, "unknown"),  # service error
+        ({"error_code": "bad_request"}, 400, "failed"),  # definite rejection
+    ]
+    for payload, status_code, expected in cases:
+        sender = _sender_with(
+            monkeypatch, lambda *a, p=payload, s=status_code, **k: _FakeResponse(p, s)
+        )
+        assert sender.send(_dummy_message()).status == expected, (payload, status_code)
+
+
+def test_abandoned_pending_message_recovers_to_unknown(client, db, make_user, sms_sender):
+    """A crash between the durable insert and the provider outcome must not
+    block the lead forever."""
+    from datetime import timedelta
+
+    from app.models import utcnow
+    from app.services.messaging import PENDING_RECOVERY_MINUTES, recover_abandoned_pending
+
+    headers = owner_session(client, make_user)
+    lead = create_lead(client, headers).json()
+
+    # Simulate the crash window: a committed pending row, no outcome recorded.
+    stranded = OutboundMessage(
+        lead_id=uuid.UUID(lead["id"]),
+        purpose="human_reply",
+        to_phone="+15550100001",
+        body="interrupted send",
+        status="pending",
+        idempotency_key_digest="digest-stranded",
+        created_at=utcnow() - timedelta(minutes=PENDING_RECOVERY_MINUTES + 1),
+    )
+    db.add(stranded)
+    db.commit()
+
+    # The stranded row must not block the lead: sending recovers it first.
+    unblocked = send_sms(client, headers, lead["id"], key="stranded-key-1")
+    assert unblocked.status_code == 201
+
+    db.expire_all()
+    recovered = db.scalar(
+        select(OutboundMessage).where(OutboundMessage.idempotency_key_digest == "digest-stranded")
+    )
+    assert recovered.status == "unknown"  # never "failed"
+    assert recovered.error_code == "abandoned"
+    # Still visible in the conversation with the ambiguous outcome.
+    listing = client.get(f"/api/v1/leads/{lead['id']}/messages", headers=headers).json()
+    assert any(item["status"] == "unknown" for item in listing)
+    # Recovery never resends the stranded message.
+    assert all(entry["body"] != "interrupted send" for entry in sms_sender.sent)
+
+    # A fresh pending row inside the window is left alone.
+    fresh = OutboundMessage(
+        lead_id=uuid.UUID(lead["id"]),
+        purpose="human_reply",
+        to_phone="+15550100001",
+        body="in flight",
+        status="pending",
+        idempotency_key_digest="digest-fresh",
+    )
+    db.add(fresh)
+    db.commit()
+    assert recover_abandoned_pending(db, uuid.UUID(lead["id"])) == 0
+
+
+def test_settings_row_is_a_singleton(client, db, make_user) -> None:
+    from sqlalchemy import func as sa_func
+
+    from app.models import CommunicationSettings
+    from app.services.messaging import get_settings_row
+
+    headers = owner_session(client, make_user)
+    client.get("/api/v1/settings/communication", headers=headers)
+    for _ in range(3):
+        get_settings_row(db)
+    db.commit()
+    assert db.scalar(sa_func.count(CommunicationSettings.id)) == 1
+
+
+def test_concurrent_duplicate_keys_contact_the_provider_once(client, make_user, sms_sender):
+    headers = owner_session(client, make_user)
+    lead = create_lead(client, headers).json()
+    first = send_sms(client, headers, lead["id"], key="dup-provider-01")
+    second = send_sms(client, headers, lead["id"], key="dup-provider-01")
+    assert first.json()["id"] == second.json()["id"]
+    assert len(sms_sender.sent) == 1

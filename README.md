@@ -138,6 +138,16 @@ docker compose exec n8n sh -c 'n8n list:workflow | cut -d"|" -f1 | xargs -I{} n8
 docker compose restart n8n
 ```
 
+### Editor access and exposure
+
+n8n 2.x has no basic-auth environment mechanism (`N8N_BASIC_AUTH_*` was removed). Editor access is protected by **n8n's built-in user management**: the first visit to http://localhost:5678 prompts you to create the owner account, and further editors are invited from *Settings → Users*. Locally the port is bound to `127.0.0.1` only, so the editor is not reachable from other machines.
+
+For any non-local deployment, put n8n behind a reverse proxy that:
+
+- exposes only the production webhook paths (`/webhook/...`) to the internet, so providers can deliver events;
+- restricts the editor UI and the REST/management surface (`/rest`, `/api`, `/webhook-test`) to trusted networks, a VPN, or an authenticated proxy;
+- terminates TLS and sets `WEBHOOK_URL` to the public HTTPS origin (Twilio and Meta signature checks are computed against that exact URL).
+
 Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms`, `/webhook/twilio-voice`, `/webhook/twilio-status` (delivery callbacks), `/webhook/meta-whatsapp`, `/webhook/meta-messenger` (the Meta paths also answer the GET verification handshake), plus the internal `/webhook/twilio-send` the CRM calls to send SMS. Configure the provider secrets in `.env` (`TWILIO_AUTH_TOKEN`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, optional `FORM_SHARED_SECRET`); signature checks reject unauthenticated calls. In the n8n UI, set "Inbound Error Handler" as the default error workflow for the channel workflows. Website forms POST JSON with `submission_id`, `name`, `email`/`phone`, `message`, and optional `form`/`page`/`campaign`/`referrer`/`submitted_at`.
 
 ## Shutdown and cleanup

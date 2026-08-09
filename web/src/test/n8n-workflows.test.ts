@@ -28,6 +28,7 @@ type Item = { json: Record<string, unknown>; binary?: Record<string, unknown> };
 type Workflow = {
   name: string;
   settings?: Record<string, unknown>;
+  connections?: Record<string, unknown>;
   nodes: Array<{
     name: string;
     type: string;
@@ -617,12 +618,14 @@ describe("twilio send workflow", () => {
     expect(result.json).toMatchObject({ reject: true, status: 503 });
   });
 
-  test("classifies provider success and failure", () => {
+  test("a 2xx with a SID is a definite success", () => {
     const [ok] = runCodeNode(workflow, "Classify Send", [
       { json: { statusCode: 201, body: { sid: "SMfake001", status: "queued" } } },
     ]);
     expect(ok.json).toMatchObject({ status: "submitted", sid: "SMfake001" });
+  });
 
+  test("a parseable 4xx rejection is a definite failure", () => {
     const [failed] = runCodeNode(workflow, "Classify Send", [
       { json: { statusCode: 400, body: { code: 21610, message: "Unsubscribed recipient" } } },
     ]);
@@ -631,6 +634,124 @@ describe("twilio send workflow", () => {
       error_code: "21610",
       error_message: "Unsubscribed recipient",
     });
+  });
+
+  test("ambiguous provider outcomes never become 'failed'", () => {
+    const ambiguous: Array<[string, Record<string, unknown>]> = [
+      ["no response at all (network/timeout)", { error: "ECONNRESET" }],
+      ["provider 5xx", { statusCode: 500, body: { message: "server error" } }],
+      ["provider 503", { statusCode: 503, body: null }],
+      ["2xx without a SID", { statusCode: 201, body: { status: "queued" } }],
+      ["2xx with an unreadable body", { statusCode: 200, body: "not-json" }],
+      ["unparseable 4xx", { statusCode: 429, body: null }],
+    ];
+    for (const [label, response] of ambiguous) {
+      const [result] = runCodeNode(workflow, "Classify Send", [{ json: response }]);
+      expect(result.json.status, label).toBe("unknown");
+      expect(String(result.json.error_message ?? "").length, label).toBeLessThanOrEqual(300);
+    }
+  });
+
+  test("the submission itself is never retried automatically", () => {
+    const send = workflow.nodes.find((node) => node.name === "Twilio Send")!;
+    expect(send.retryOnFail ?? false).toBe(false);
+  });
+
+  test("classification output carries no credentials", () => {
+    const [result] = runCodeNode(workflow, "Classify Send", [
+      {
+        json: {
+          statusCode: 401,
+          headers: { authorization: "Basic c2VjcmV0OnZhbHVl" },
+          body: { code: 20003, message: "Authenticate" },
+        },
+      },
+    ]);
+    const serialized = JSON.stringify(result.json);
+    expect(serialized).not.toMatch(/Basic /);
+    expect(serialized).not.toMatch(/authorization/i);
+  });
+});
+
+describe("twilio delivery status honesty", () => {
+  const workflow = loadWorkflow("twilio-status.json");
+
+  function classifyStatus(response: Record<string, unknown>) {
+    const node = workflow.nodes.find((c) => c.name === "Classify Status")!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function("$input", "$env", "$", "require", "Buffer", String(node.parameters.jsCode));
+    return fn(
+      { all: () => [{ json: response }] },
+      ENV,
+      () => ({ first: () => ({ json: { payload: { provider_sid: "SMfake1", status: "sent" } } }) }),
+      nodeRequire,
+      Buffer,
+    ) as Array<{ json: Record<string, unknown> }>;
+  }
+
+  test("only a CRM 2xx becomes a success", () => {
+    const [matched] = classifyStatus({ statusCode: 200, body: { matched: true, status: "delivered" } });
+    expect(matched.json.outcome).toBe("success");
+    // An authenticated callback for a SID we do not track is handled, not an error.
+    const [unmatched] = classifyStatus({ statusCode: 200, body: { matched: false, status: null } });
+    expect(unmatched.json.outcome).toBe("success");
+  });
+
+  test("permanent CRM rejections are not retried", () => {
+    for (const status of [400, 401, 403, 404, 413, 422]) {
+      const [result] = classifyStatus({ statusCode: status, body: {} });
+      expect(result.json.outcome, `status ${status}`).toBe("permanent");
+    }
+  });
+
+  test("temporary CRM failures are routed to the bounded retry", () => {
+    for (const status of [0, 429, 500, 502, 503, 504]) {
+      const [result] = classifyStatus({ statusCode: status, body: {} });
+      expect(result.json.outcome, `status ${status}`).toBe("retry");
+    }
+  });
+
+  test("the retry classifier reports success or honest exhaustion", () => {
+    const [ok] = runCodeNode(workflow, "Classify Status Retry", [
+      { json: { statusCode: 204, body: {} } },
+    ]);
+    expect(ok.json.outcome).toBe("success");
+    const [dead] = runCodeNode(workflow, "Classify Status Retry", [
+      { json: { error: "ECONNREFUSED" } },
+    ]);
+    expect(dead.json).toMatchObject({ outcome: "exhausted", status: 503 });
+  });
+
+  test("no CRM result path reaches the 200 response without classification", () => {
+    const successResponders = ["Respond Status OK", "Respond Status Retry Result"];
+    for (const [source, wiring] of Object.entries(
+      workflow.connections as Record<string, { main: Array<Array<{ node: string }>> }>,
+    )) {
+      const targets = wiring.main.flat().map((connection) => connection.node);
+      if (targets.some((target) => successResponders.includes(target))) {
+        // Success responses may only be reached from a classifier/router.
+        expect(["Route Outcome", "Classify Status Retry"], source).toContain(source);
+      }
+    }
+    // Neither CRM node may answer the webhook directly.
+    for (const crmNode of ["CRM Status Update", "CRM Status Retry"]) {
+      const wiring = (workflow.connections as Record<string, { main: Array<Array<{ node: string }>> }>)[
+        crmNode
+      ];
+      const targets = wiring.main.flat().map((connection) => connection.node);
+      expect(targets.every((target) => target.startsWith("Classify")), crmNode).toBe(true);
+    }
+  });
+
+  test("error output exposes no CRM key, headers or callback data", () => {
+    const [result] = classifyStatus({
+      statusCode: 500,
+      headers: { "x-api-key": "test-inbound-key-not-real" },
+      body: { detail: "boom" },
+    });
+    const serialized = JSON.stringify(result.json);
+    expect(serialized).not.toContain("test-inbound-key-not-real");
+    expect(serialized).not.toMatch(/x-api-key/i);
   });
 });
 
@@ -675,10 +796,13 @@ describe("twilio delivery status workflow", () => {
     expect(result.json).toMatchObject({ reject: true, status: 403 });
   });
 
-  test("relays to the CRM with a safely repeatable retry", () => {
-    const relay = workflow.nodes.find((node) => node.name === "CRM Status Update")!;
-    expect(relay.parameters.url).toBe("={{ $env.CRM_API_URL }}/api/v1/inbound/message-status");
-    expect(relay.retryOnFail).toBe(true);
-    expect(relay.maxTries).toBeLessThanOrEqual(3);
+  test("relays to the CRM, retrying only on the dedicated retry node", () => {
+    const first = workflow.nodes.find((node) => node.name === "CRM Status Update")!;
+    expect(first.parameters.url).toBe("={{ $env.CRM_API_URL }}/api/v1/inbound/message-status");
+    // The first attempt must not retry: the classifier decides what is temporary.
+    expect(first.retryOnFail ?? false).toBe(false);
+    const retry = workflow.nodes.find((node) => node.name === "CRM Status Retry")!;
+    expect(retry.retryOnFail).toBe(true);
+    expect(retry.maxTries).toBeLessThanOrEqual(4);
   });
 });

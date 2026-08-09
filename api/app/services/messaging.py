@@ -36,13 +36,72 @@ class MessagingError(LeadError):
 
 
 def get_settings_row(db: Session) -> CommunicationSettings:
-    """Fetch the single settings row, creating defaults on first use."""
+    """Fetch the one settings row, creating defaults on first use.
+
+    A unique singleton key makes concurrent first access safe: the loser of
+    the race gets an IntegrityError and re-reads the winner's row, so two
+    rival settings rows can never exist.
+    """
     row = db.scalar(select(CommunicationSettings).limit(1))
-    if row is None:
+    if row is not None:
+        return row
+    savepoint = db.begin_nested()
+    try:
         row = CommunicationSettings()
         db.add(row)
-        db.flush()
+        savepoint.commit()
+    except IntegrityError:
+        savepoint.rollback()
+        row = db.scalar(select(CommunicationSettings).limit(1))
+        assert row is not None
+    db.flush()
     return row
+
+
+# A pending outbound row older than this was almost certainly abandoned by a
+# crash between the durable insert and recording the provider outcome.
+PENDING_RECOVERY_MINUTES = 10
+
+
+def recover_abandoned_pending(db: Session, lead_id: uuid.UUID | None = None) -> int:
+    """Move long-abandoned `pending` messages to the ambiguous `unknown` state.
+
+    Conservative on purpose: never `failed` (the provider may have accepted
+    it), never resent automatically, and always left visible with the
+    ambiguous-outcome warning. Without this a crashed send would block the
+    lead's pending-send guard forever.
+    """
+    cutoff = utcnow() - timedelta(minutes=PENDING_RECOVERY_MINUTES)
+    query = select(OutboundMessage).where(
+        OutboundMessage.status == "pending", OutboundMessage.created_at < cutoff
+    )
+    if lead_id is not None:
+        query = query.where(OutboundMessage.lead_id == lead_id)
+
+    recovered = 0
+    for message in db.scalars(query):
+        message.status = "unknown"
+        message.error_code = "abandoned"
+        message.error_message = (
+            "The send was interrupted before the provider confirmed it. "
+            "It may or may not have been delivered."
+        )
+        lead = db.get(Lead, message.lead_id)
+        if lead is not None:
+            add_activity(
+                db,
+                lead,
+                "message_status",
+                f"{PURPOSE_LABELS[message.purpose]} outcome unconfirmed: the send was "
+                "interrupted before the provider responded.",
+                channel="sms",
+                direction="outbound",
+                meta={"message_id": str(message.id), "status": "unknown"},
+            )
+        recovered += 1
+    if recovered:
+        db.flush()
+    return recovered
 
 
 def validate_template(template: str) -> str:
@@ -127,8 +186,10 @@ class N8nSmsSender:
                 error_message="No confirmation received from the messaging service.",
             )
         except httpx.HTTPError as error:
+            # A transport failure is ambiguous: the request may have reached
+            # the provider before the connection broke.
             return SendOutcome(
-                status="failed",
+                status="unknown",
                 error_code="transport_error",
                 error_message=type(error).__name__,
             )
@@ -145,13 +206,26 @@ class N8nSmsSender:
             return SendOutcome(
                 status="unknown", error_code="bad_response", error_message="Unreadable response."
             )
-        if response.status_code >= 400 or data.get("status") == "failed":
-            return SendOutcome(
-                status="failed",
-                error_code=str(data.get("error_code") or response.status_code)[:32],
-                error_message=str(data.get("error_message") or "Send rejected.")[:500],
-            )
-        return SendOutcome(status="submitted", provider_sid=data.get("sid"))
+
+        # The send workflow classifies the provider outcome; trust it verbatim
+        # so an ambiguous result is never upgraded to a definite one.
+        reported = str(data.get("status") or "")
+        error_code = str(data.get("error_code") or response.status_code)[:32]
+        error_message = str(data.get("error_message") or "Send rejected.")[:500]
+        if response.status_code >= 400 or reported == "failed":
+            return SendOutcome(status="failed", error_code=error_code, error_message=error_message)
+        if reported == "submitted" and data.get("sid"):
+            return SendOutcome(status="submitted", provider_sid=str(data["sid"])[:64])
+        # Nominal success without a usable SID, or an explicit "unknown".
+        return SendOutcome(
+            status="unknown",
+            error_code=error_code if reported == "unknown" else "no_sid",
+            error_message=(
+                error_message
+                if reported == "unknown"
+                else "The provider did not confirm a message id."
+            ),
+        )
 
 
 def _apply_outcome(db: Session, message: OutboundMessage, outcome: SendOutcome) -> None:
@@ -324,6 +398,10 @@ def send_lead_sms(
     if not lead.phone or not lead.phone.startswith("+"):
         raise MessagingError("This lead has no phone number in international format.")
 
+    # Clear anything abandoned by a crash first, so one interrupted send does
+    # not block this lead's messaging forever.
+    if recover_abandoned_pending(db, lead.id):
+        db.commit()
     pending = db.scalar(
         select(OutboundMessage).where(
             OutboundMessage.lead_id == lead.id, OutboundMessage.status == "pending"
@@ -394,6 +472,39 @@ def send_automated_messages(
     return sent
 
 
+# Twilio message statuses mapped onto our own delivery states.
+PROVIDER_STATUS_MAP = {
+    "queued": "submitted",
+    "accepted": "submitted",
+    "scheduled": "submitted",
+    "sending": "submitted",
+    "sent": "submitted",
+    "delivered": "delivered",
+    "undelivered": "failed",
+    "failed": "failed",
+    "canceled": "failed",
+}
+
+# The only permitted delivery-state transitions. Callbacks arrive out of
+# order and more than once, so the state machine is deliberately monotonic:
+# `delivered` and `failed` are terminal, and an ambiguous `unknown` may still
+# be resolved by a definitive provider outcome.
+ALLOWED_STATUS_TRANSITIONS: dict[str, frozenset[str]] = {
+    "pending": frozenset({"submitted", "delivered", "failed", "unknown"}),
+    "submitted": frozenset({"delivered", "failed"}),
+    "unknown": frozenset({"submitted", "delivered", "failed"}),
+    "delivered": frozenset(),  # terminal
+    "failed": frozenset(),  # terminal
+}
+
+
+def transition_allowed(current: str, proposed: str) -> bool:
+    """Central definition of permitted delivery-state moves."""
+    if current == proposed:
+        return False  # repeated callback: nothing to change
+    return proposed in ALLOWED_STATUS_TRANSITIONS.get(current, frozenset())
+
+
 def apply_delivery_status(
     db: Session, provider_sid: str, status: str, error_code: str | None, error_message: str | None
 ) -> OutboundMessage | None:
@@ -403,20 +514,9 @@ def apply_delivery_status(
     if message is None:
         return None
 
-    mapping = {
-        "queued": "submitted",
-        "accepted": "submitted",
-        "sending": "submitted",
-        "sent": "submitted",
-        "delivered": "delivered",
-        "undelivered": "failed",
-        "failed": "failed",
-    }
-    new_status = mapping.get(status)
-    if new_status is None or new_status == message.status:
-        return message  # unknown or repeated callback: nothing to change
-    # Delivered is terminal; a late "sent" callback must not walk it backwards.
-    if message.status == "delivered" and new_status != "failed":
+    new_status = PROVIDER_STATUS_MAP.get(status)
+    if new_status is None or not transition_allowed(message.status, new_status):
+        # Unrecognised, repeated, out-of-order or terminal-state callback.
         return message
 
     now = utcnow()

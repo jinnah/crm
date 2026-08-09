@@ -201,3 +201,41 @@ def test_concurrent_inbound_duplicates_yield_one_lead_and_activity(pg_session_fa
     assert check.scalar(select(func.count()).select_from(LeadActivity)) == 1
     assert check.scalar(select(func.count()).select_from(InboundEvent)) == 1
     check.close()
+
+
+def test_concurrent_settings_creation_yields_one_row(pg_session_factory) -> None:
+    """Two transactions racing to create the settings row must leave exactly
+    one; the unique singleton key decides the winner."""
+    from sqlalchemy import func
+
+    from app.models import CommunicationSettings
+    from app.services.messaging import get_settings_row
+
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def create() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            get_settings_row(session)
+            session.commit()
+        except Exception as error:  # pragma: no cover - failure diagnostics
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=create) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+    assert not errors, errors
+
+    check = pg_session_factory()
+    assert check.scalar(func.count(CommunicationSettings.id)) == 1
+    # Reads stay deterministic afterwards.
+    first = get_settings_row(check).id
+    assert get_settings_row(check).id == first
+    check.close()

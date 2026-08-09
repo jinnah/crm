@@ -81,11 +81,9 @@ services:
       # n8n 2.x runs Code nodes in a task runner; it needs the same allowances.
       N8N_RUNNERS_ENABLED: "true"
       N8N_RUNNERS_MAX_CONCURRENCY: "5"
-      # The editor is exposed only on the local Compose port. Set these in any
-      # non-local deployment so the editor is never publicly unauthenticated.
-      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-false}
-      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-}
-      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-}
+      # Editor access is protected by n8n's own owner/user management (set up
+      # on first visit). n8n 2.x has no basic-auth env mechanism; the port
+      # binding below plus a reverse proxy are the network-level controls.
       # Workflow configuration (all placeholders; never commit real values).
       CRM_API_URL: http://api:8000
       CRM_INBOUND_API_KEY: ${INBOUND_API_KEY:-}
