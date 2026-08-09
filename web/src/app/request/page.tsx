@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { BrandMark, useBranding } from "@/components/brand-mark";
 
 type FormInfo = { form_title: string; form_intro: string; business_name: string };
 
@@ -13,6 +14,7 @@ function newSubmissionId(): string {
 }
 
 export default function PublicRequestPage() {
+  const branding = useBranding();
   const [info, setInfo] = useState<FormInfo | null>(null);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -93,6 +95,12 @@ export default function PublicRequestPage() {
     return (
       <main className="public-form">
         <div className="public-card">
+            <div className="public-brand">
+            <BrandMark branding={branding} />
+            <span className="public-brand-name">
+              {info?.business_name ?? branding?.business_name ?? ""}
+            </span>
+          </div>
           <h1>{outcome === "duplicate" ? "We already have your request" : "Request received"}</h1>
           <p role="status">
             {outcome === "duplicate"
@@ -107,6 +115,12 @@ export default function PublicRequestPage() {
   return (
     <main className="public-form">
       <form className="public-card" onSubmit={handleSubmit} noValidate>
+        <div className="public-brand">
+          <BrandMark branding={branding} />
+          <span className="public-brand-name">
+            {info?.business_name ?? branding?.business_name ?? ""}
+          </span>
+        </div>
         <h1>{info?.form_title ?? "Request a quote"}</h1>
         {info?.form_intro ? <p>{info.form_intro}</p> : null}
 

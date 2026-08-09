@@ -5,6 +5,7 @@ import ProtectedLayout from "../layout";
 import LeadsPage from "./page";
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
 }));
 
@@ -59,9 +60,11 @@ function renderLeads(role: "owner" | "team_member") {
 
 test("owner sees leads, filters, badges and the new-lead action", async () => {
   renderLeads("owner");
-  expect(await screen.findByRole("link", { name: /Alpha Roofing/ })).toBeInTheDocument();
+  // The lead renders twice: once in the desktop table, once as the stacked
+  // mobile card. CSS shows exactly one at a time.
+  expect((await screen.findAllByRole("link", { name: /Alpha Roofing/ })).length).toBe(2);
   expect(screen.getAllByText("Needs review").length).toBeGreaterThan(1); // filter + badge
-  expect(screen.getByText("member@example.com")).toBeInTheDocument();
+  expect(screen.getAllByText("member@example.com").length).toBeGreaterThan(0);
   expect(screen.getByRole("link", { name: "New lead" })).toBeInTheDocument();
   expect(screen.getByLabelText("Search")).toBeInTheDocument();
   expect(screen.getByLabelText("Status")).toBeInTheDocument();
@@ -71,7 +74,7 @@ test("owner sees leads, filters, badges and the new-lead action", async () => {
 
 test("team members get no create action or assignee filter", async () => {
   renderLeads("team_member");
-  expect(await screen.findByRole("link", { name: /Alpha Roofing/ })).toBeInTheDocument();
+  expect((await screen.findAllByRole("link", { name: /Alpha Roofing/ })).length).toBe(2);
   expect(screen.queryByRole("link", { name: "New lead" })).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Assignee")).not.toBeInTheDocument();
 });

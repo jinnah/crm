@@ -54,9 +54,8 @@ test("shows the appointment without any CRM detail behind it", async () => {
     await screen.findByRole("heading", { name: "Your appointment with Acme Plumbing" }),
   ).toBeInTheDocument();
   expect(screen.getByText(/APT-ABCD1234/)).toBeInTheDocument();
-  expect(String(fetchMock.mock.calls[0][0])).toBe(
-    "/api/public-appointment/AbCdEf0123456789_-xyzMANAGEtoken",
-  );
+  const urls = fetchMock.mock.calls.map(([target]) => String(target));
+  expect(urls).toContain("/api/public-appointment/AbCdEf0123456789_-xyzMANAGEtoken");
   const markup = document.body.innerHTML;
   expect(markup).not.toMatch(/lead_id|notes|@example/i);
 });

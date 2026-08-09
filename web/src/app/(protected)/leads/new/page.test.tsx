@@ -6,6 +6,7 @@ import NewLeadPage from "./page";
 
 const { push } = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace: vi.fn(), push, refresh: vi.fn() }),
 }));
 

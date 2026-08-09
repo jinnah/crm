@@ -5,6 +5,7 @@ import ProtectedLayout from "./layout";
 import HomePage from "./page";
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
 }));
 
@@ -37,6 +38,29 @@ const LEAD = {
   custom_values: {},
 };
 
+const APPOINTMENT = {
+  id: "dddddddd-0000-0000-0000-000000000001",
+  lead_id: LEAD.id,
+  lead_name: "Overdue Lead",
+  subject: "Roof survey",
+  start_at: "2026-08-10T14:00:00Z",
+  timezone: "UTC",
+  status: "scheduled",
+  detail: null,
+};
+
+const EMPTY_QUEUE = {
+  overdue: [],
+  due_today: [],
+  unassigned: [],
+  needs_review: [],
+  unresponded: [],
+  appointments_overdue: [],
+  appointments_upcoming: [],
+  appointment_messages_failed: [],
+  appointment_messages_unknown: [],
+};
+
 function renderHome(queue: unknown, role: "owner" | "team_member" = "owner") {
   stubFetchRoutes([
     ["/auth/session", { status: 200, body: { user: makeUser({ role }), csrf_token: "csrf" } }],
@@ -49,26 +73,64 @@ function renderHome(queue: unknown, role: "owner" | "team_member" = "owner") {
   );
 }
 
-test("shows attention groups with leads", async () => {
+test("shows summary cards and grouped attention sections", async () => {
   renderHome({
+    ...EMPTY_QUEUE,
     overdue: [LEAD],
-    due_today: [],
     unassigned: [{ ...LEAD, id: "bbbbbbbb-0000-0000-0000-000000000002", name: "Fresh Lead" }],
-    needs_review: [],
-    unresponded: [],
+    appointments_upcoming: [APPOINTMENT],
+    appointment_messages_unknown: [
+      { ...APPOINTMENT, detail: "confirmation message unknown: unconfirmed" },
+    ],
   });
-  expect(await screen.findByRole("heading", { name: "Overdue follow-ups" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Overdue Lead" })).toHaveAttribute(
-    "href",
-    `/leads/${LEAD.id}`,
-  );
-  expect(screen.getByRole("heading", { name: "New unassigned leads" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Today" })).toBeInTheDocument();
+
+  // Summary cards carry real counts, not invented metrics. "Follow-ups due"
+  // appears twice by design: as the summary card and as its section heading.
+  expect(screen.getAllByText("Follow-ups due").length).toBe(2);
+  expect(screen.getByText("Unassigned leads")).toBeInTheDocument();
+  expect(screen.getByText("Upcoming appointments")).toBeInTheDocument();
+
+  // Grouped sections with rows that link to the lead.
+  expect(screen.getByRole("heading", { name: /Follow-ups due/ })).toBeInTheDocument();
+  // The same lead can legitimately appear in several categories; every row
+  // links to the same place.
+  const overdueLinks = screen.getAllByRole("link", { name: "Overdue Lead" });
+  expect(overdueLinks.length).toBeGreaterThan(0);
+  for (const link of overdueLinks) {
+    expect(link).toHaveAttribute("href", `/leads/${LEAD.id}`);
+  }
+  expect(screen.getByRole("heading", { name: /New unassigned leads/ })).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "Fresh Lead" })).toBeInTheDocument();
-  // Empty groups are not rendered.
-  expect(screen.queryByRole("heading", { name: "Needs review" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: /Coming up/ })).toBeInTheDocument();
+  // Ambiguous provider outcomes stay visible but concise.
+  expect(
+    screen.getByRole("heading", { name: /Appointment messages to check/ }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Unconfirmed")).toBeInTheDocument();
+  // Empty categories are not rendered as sections.
+  expect(screen.queryByRole("heading", { name: /Response overdue/ })).not.toBeInTheDocument();
 });
 
-test("shows the empty state when nothing needs attention", async () => {
-  renderHome({ overdue: [], due_today: [], unassigned: [], needs_review: [], unresponded: [] });
-  expect(await screen.findByText("Nothing needs attention right now.")).toBeInTheDocument();
+test("shows an intentional empty state when nothing needs attention", async () => {
+  renderHome(EMPTY_QUEUE);
+  expect(await screen.findByText("All clear")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "Go to leads" })).toBeInTheDocument();
+});
+
+test("relative urgency accompanies the exact follow-up time", async () => {
+  renderHome({ ...EMPTY_QUEUE, overdue: [LEAD] });
+  expect(await screen.findByText(/Overdue ·/)).toBeInTheDocument();
+});
+
+test("team members do not see the unassigned category", async () => {
+  renderHome(
+    {
+      ...EMPTY_QUEUE,
+      unassigned: [{ ...LEAD, id: "cccccccc-0000-0000-0000-000000000003", name: "Hidden Lead" }],
+    },
+    "team_member",
+  );
+  expect(await screen.findByText("All clear")).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Hidden Lead" })).not.toBeInTheDocument();
 });

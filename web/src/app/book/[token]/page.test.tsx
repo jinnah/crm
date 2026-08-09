@@ -52,10 +52,12 @@ test("offers the free times and nothing about the lead", async () => {
   expect(screen.getByText(/60 minutes/)).toBeInTheDocument();
   expect(screen.getAllByRole("radio")).toHaveLength(2);
 
-  // Only the same-origin route is ever contacted — the CRM is not exposed.
-  expect(String(fetchMock.mock.calls[0][0])).toBe(
-    "/api/public-booking/AbCdEf0123456789_-xyzTOKENvalue",
-  );
+  // The booking data itself travels only through the same-origin route; the
+  // only direct API call is the public branding lookup for the logo header.
+  const urls = fetchMock.mock.calls.map(([target]) => String(target));
+  expect(urls).toContain("/api/public-booking/AbCdEf0123456789_-xyzTOKENvalue");
+  const direct = urls.filter((target) => target.includes("localhost:8000"));
+  expect(direct.every((target) => target.includes("/public/branding"))).toBe(true);
   const markup = document.body.innerHTML;
   expect(markup).not.toMatch(/lead|customer_id|phone|@/i);
 });

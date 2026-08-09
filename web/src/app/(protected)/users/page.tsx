@@ -1,20 +1,36 @@
 "use client";
 
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
+import {
+  Badge,
+  Button,
+  ActionsMenu,
+  Card,
+  ConfirmDialog,
+  FormDialog,
+  InlineError,
+  InlineSuccess,
+  PageHeader,
+} from "@/components/ui";
 import { api, errorDetail, type Role, type SessionUser } from "@/lib/api";
 import { passwordPolicyError } from "@/lib/password";
 import { ROLE_LABELS } from "@/lib/roles";
+
+const ROLE_TONES: Record<Role, "teal" | "blue" | "gray"> = {
+  owner: "teal",
+  manager: "blue",
+  team_member: "gray",
+};
 
 export default function UsersPage() {
   const { user } = useAuth();
   if (user.role !== "owner") {
     return (
       <section>
-        <h1>User management</h1>
-        <p className="form-error" role="alert">
-          You do not have access to user management.
-        </p>
+        <PageHeader title="Users" />
+        <InlineError>You do not have access to user management.</InlineError>
       </section>
     );
   }
@@ -26,6 +42,13 @@ function UserManagement({ selfId }: { selfId: string }) {
   const [users, setUsers] = useState<SessionUser[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [resetting, setResetting] = useState<SessionUser | null>(null);
+  const [deactivating, setDeactivating] = useState<SessionUser | null>(null);
+  const [busy, setBusy] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
 
   useEffect(() => {
@@ -43,197 +66,336 @@ function UserManagement({ selfId }: { selfId: string }) {
     };
   }, [reloadNonce]);
 
-  const load = useCallback(async () => {
-    setReloadNonce((value) => value + 1);
-  }, []);
+  const load = useCallback(() => setReloadNonce((value) => value + 1), []);
+
+  const visible = useMemo(() => {
+    if (users === null) return null;
+    return users.filter((target) => {
+      if (search && !target.email.toLowerCase().includes(search.toLowerCase())) return false;
+      if (roleFilter && target.role !== roleFilter) return false;
+      if (statusFilter === "active" && !target.is_active) return false;
+      if (statusFilter === "inactive" && target.is_active) return false;
+      return true;
+    });
+  }, [users, search, roleFilter, statusFilter]);
+
+  function feedback(message: string) {
+    setError(null);
+    setNotice(message);
+    load();
+  }
+
+  function failure(message: string) {
+    setNotice(null);
+    setError(message);
+  }
 
   async function changeRole(target: SessionUser, role: Role) {
-    setError(null);
-    setNotice(null);
     const result = await api(`/users/${target.id}`, {
       method: "PATCH",
       csrfToken,
       body: { role },
     });
-    if (!result.ok) {
-      setError(errorDetail(result.data, "Unable to update the role."));
-    } else {
-      setNotice(`Role updated for ${target.email}.`);
-    }
-    await load();
+    if (!result.ok) failure(errorDetail(result.data, "Unable to update the role."));
+    else feedback(`Role updated for ${target.email}.`);
   }
 
-  async function toggleActive(target: SessionUser) {
-    setError(null);
-    setNotice(null);
+  async function setActive(target: SessionUser, active: boolean) {
+    setBusy(true);
     const result = await api(`/users/${target.id}`, {
       method: "PATCH",
       csrfToken,
-      body: { is_active: !target.is_active },
+      body: { is_active: active },
     });
-    if (!result.ok) {
-      setError(errorDetail(result.data, "Unable to update the user."));
-    } else {
-      setNotice(`${target.email} ${target.is_active ? "deactivated" : "reactivated"}.`);
-    }
-    await load();
+    setBusy(false);
+    setDeactivating(null);
+    if (!result.ok) failure(errorDetail(result.data, "Unable to update the user."));
+    else feedback(`${target.email} ${active ? "reactivated" : "deactivated"}.`);
   }
+
+  const showFilters = (users?.length ?? 0) > 5;
 
   return (
     <section>
-      <h1>User management</h1>
-      {error !== null && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
+      <PageHeader
+        title="Users"
+        description="Who can sign in, and what they are allowed to do."
+        actions={
+          <Button variant="primary" onClick={() => setCreating(true)}>
+            <Plus size={16} aria-hidden="true" />
+            Create user
+          </Button>
+        }
+      />
+
+      {error !== null && <InlineError>{error}</InlineError>}
+      {notice !== null && <InlineSuccess>{notice}</InlineSuccess>}
+
+      {showFilters && (
+        <div className="toolbar">
+          <div className="form-field" style={{ flex: "1 1 12rem" }}>
+            <label htmlFor="user-search">Search</label>
+            <input
+              id="user-search"
+              type="search"
+              placeholder="Email"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </div>
+          <div className="form-field">
+            <label htmlFor="user-role-filter">Role</label>
+            <select
+              id="user-role-filter"
+              value={roleFilter}
+              onChange={(event) => setRoleFilter(event.target.value)}
+            >
+              <option value="">All</option>
+              {Object.entries(ROLE_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="form-field">
+            <label htmlFor="user-status-filter">Status</label>
+            <select
+              id="user-status-filter"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value)}
+            >
+              <option value="">All</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        </div>
       )}
-      {notice !== null && (
-        <p className="form-success" role="status">
-          {notice}
-        </p>
-      )}
-      {users === null ? (
+
+      {visible === null ? (
         <p className="page-status" role="status">
           Loading users…
         </p>
       ) : (
-        <table className="users-table">
-          <caption className="visually-hidden">Existing users</caption>
-          <thead>
-            <tr>
-              <th scope="col">Email</th>
-              <th scope="col">Role</th>
-              <th scope="col">Status</th>
-              <th scope="col">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {users.map((target) => (
-              <UserRow
-                key={target.id}
-                target={target}
-                isSelf={target.id === selfId}
-                csrfToken={csrfToken}
-                onChangeRole={changeRole}
-                onToggleActive={toggleActive}
-                onDone={(message) => {
-                  setError(null);
-                  setNotice(message);
-                  void load();
-                }}
-                onError={(message) => {
-                  setNotice(null);
-                  setError(message);
-                }}
-              />
-            ))}
-          </tbody>
-        </table>
+        <Card flush className="table-card">
+          <table className="data-table">
+            <caption className="visually-hidden">Existing users</caption>
+            <thead>
+              <tr>
+                <th scope="col">Email</th>
+                <th scope="col">Role</th>
+                <th scope="col">Status</th>
+                <th scope="col">
+                  <span className="visually-hidden">Actions</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {visible.map((target) => {
+                const isSelf = target.id === selfId;
+                return (
+                  <tr key={target.id}>
+                    <td style={{ fontWeight: 600 }}>
+                      {target.email}
+                      {isSelf && (
+                        <span className="cell-secondary" style={{ fontWeight: 400 }}>
+                          {" "}
+                          (you)
+                        </span>
+                      )}
+                    </td>
+                    <td>
+                      <label htmlFor={`role-${target.id}`} className="visually-hidden">
+                        Role for {target.email}
+                      </label>
+                      <span
+                        style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}
+                      >
+                        <Badge tone={ROLE_TONES[target.role]}>{ROLE_LABELS[target.role]}</Badge>
+                        <select
+                          id={`role-${target.id}`}
+                          value={target.role}
+                          disabled={isSelf}
+                          title={isSelf ? "You cannot change your own role." : undefined}
+                          onChange={(event) =>
+                            void changeRole(target, event.target.value as Role)
+                          }
+                        >
+                          {Object.entries(ROLE_LABELS).map(([value, label]) => (
+                            <option key={value} value={value}>
+                              {label}
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                    </td>
+                    <td>
+                      {target.is_active ? (
+                        <Badge tone="green">Active</Badge>
+                      ) : (
+                        <Badge>Inactive</Badge>
+                      )}
+                    </td>
+                    <td style={{ textAlign: "right" }}>
+                      <ActionsMenu label="Actions">
+                        {(close) => (
+                          <>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                close();
+                                setResetting(target);
+                              }}
+                            >
+                              Set temporary password
+                            </button>
+                            {target.is_active ? (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="menu-destructive"
+                                disabled={isSelf}
+                                onClick={() => {
+                                  close();
+                                  setDeactivating(target);
+                                }}
+                              >
+                                Deactivate
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                onClick={() => {
+                                  close();
+                                  void setActive(target, true);
+                                }}
+                              >
+                                Reactivate
+                              </button>
+                            )}
+                            {isSelf && (
+                              <span className="menu-hint">
+                                You cannot deactivate your own account.
+                              </span>
+                            )}
+                          </>
+                        )}
+                      </ActionsMenu>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </Card>
       )}
-      <CreateUserForm
-        csrfToken={csrfToken}
-        onCreated={(email) => {
-          setError(null);
-          setNotice(`User ${email} created with a temporary password.`);
-          void load();
+
+      <FormDialog open={creating} title="Create user" onClose={() => setCreating(false)}>
+        <CreateUserForm
+          csrfToken={csrfToken}
+          onCreated={(email) => {
+            setCreating(false);
+            feedback(`User ${email} created with a temporary password.`);
+          }}
+        />
+      </FormDialog>
+
+      <FormDialog
+        open={resetting !== null}
+        title={`Set a temporary password`}
+        onClose={() => setResetting(null)}
+      >
+        {resetting !== null && (
+          <ResetPasswordForm
+            target={resetting}
+            csrfToken={csrfToken}
+            onDone={(message) => {
+              setResetting(null);
+              feedback(message);
+            }}
+          />
+        )}
+      </FormDialog>
+
+      <ConfirmDialog
+        open={deactivating !== null}
+        title={`Deactivate ${deactivating?.email ?? ""}?`}
+        description="They are signed out everywhere and can no longer log in. Their leads, notes and history stay exactly as they are, and you can reactivate them at any time."
+        confirmLabel="Deactivate"
+        destructive
+        busy={busy}
+        onConfirm={() => {
+          if (deactivating !== null) void setActive(deactivating, false);
         }}
+        onCancel={() => setDeactivating(null)}
       />
     </section>
   );
 }
 
-type UserRowProps = {
-  target: SessionUser;
-  isSelf: boolean;
-  csrfToken: string;
-  onChangeRole: (target: SessionUser, role: Role) => Promise<void>;
-  onToggleActive: (target: SessionUser) => Promise<void>;
-  onDone: (message: string) => void;
-  onError: (message: string) => void;
-};
-
-function UserRow({
+function ResetPasswordForm({
   target,
-  isSelf,
   csrfToken,
-  onChangeRole,
-  onToggleActive,
   onDone,
-  onError,
-}: UserRowProps) {
-  const [showReset, setShowReset] = useState(false);
+}: {
+  target: SessionUser;
+  csrfToken: string;
+  onDone: (message: string) => void;
+}) {
   const [tempPassword, setTempPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  async function submitReset(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const policyError = passwordPolicyError(tempPassword);
     if (policyError !== null) {
-      onError(policyError);
+      setError(policyError);
       return;
     }
+    setSubmitting(true);
     const result = await api(`/users/${target.id}/reset-password`, {
       method: "POST",
       csrfToken,
       body: { temporary_password: tempPassword },
     });
+    setSubmitting(false);
     if (!result.ok) {
-      onError(errorDetail(result.data, "Unable to set a temporary password."));
+      setError(errorDetail(result.data, "Unable to set a temporary password."));
       return;
     }
-    setTempPassword("");
-    setShowReset(false);
     onDone(`Temporary password set for ${target.email}; change required at next login.`);
   }
 
-  const roleSelectId = `role-${target.id}`;
-  const resetInputId = `temp-password-${target.id}`;
-
   return (
-    <tr>
-      <td>
-        {target.email}
-        {isSelf && " (you)"}
-      </td>
-      <td>
-        <label htmlFor={roleSelectId} className="visually-hidden">
-          Role for {target.email}
+    <form onSubmit={handleSubmit} noValidate>
+      <p className="card-description" style={{ marginBottom: "1rem" }}>
+        {target.email} must change it at their next sign-in.
+      </p>
+      <div className="form-field">
+        <label htmlFor={`temp-password-${target.id}`}>
+          Temporary password for {target.email}
         </label>
-        <select
-          id={roleSelectId}
-          value={target.role}
-          onChange={(event) => void onChangeRole(target, event.target.value as Role)}
-        >
-          {Object.entries(ROLE_LABELS).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td>{target.is_active ? "Active" : "Inactive"}</td>
-      <td className="users-actions">
-        <button type="button" onClick={() => void onToggleActive(target)}>
-          {target.is_active ? "Deactivate" : "Reactivate"}
-        </button>
-        <button type="button" onClick={() => setShowReset((value) => !value)}>
-          {showReset ? "Cancel reset" : "Set temporary password"}
-        </button>
-        {showReset && (
-          <form className="inline-form" onSubmit={submitReset}>
-            <label htmlFor={resetInputId}>Temporary password for {target.email}</label>
-            <input
-              id={resetInputId}
-              type="password"
-              autoComplete="new-password"
-              required
-              value={tempPassword}
-              onChange={(event) => setTempPassword(event.target.value)}
-            />
-            <button type="submit">Apply</button>
-          </form>
-        )}
-      </td>
-    </tr>
+        <input
+          id={`temp-password-${target.id}`}
+          type="password"
+          autoComplete="new-password"
+          required
+          value={tempPassword}
+          onChange={(event) => setTempPassword(event.target.value)}
+        />
+        <p className="form-help">At least 12 characters.</p>
+      </div>
+      {error !== null && <InlineError>{error}</InlineError>}
+      <div className="dialog-actions">
+        <Button type="submit" variant="primary" disabled={submitting}>
+          {submitting ? "Applying…" : "Apply"}
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -277,8 +439,7 @@ function CreateUserForm({
   }
 
   return (
-    <form className="create-user-form" onSubmit={handleSubmit} noValidate>
-      <h2>Create user</h2>
+    <form onSubmit={handleSubmit} noValidate>
       <div className="form-field">
         <label htmlFor="create-email">Email</label>
         <input
@@ -319,14 +480,12 @@ function CreateUserForm({
           At least 12 characters. The user must change it at first login.
         </p>
       </div>
-      {error !== null && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      <button type="submit" disabled={submitting}>
-        {submitting ? "Creating…" : "Create user"}
-      </button>
+      {error !== null && <InlineError>{error}</InlineError>}
+      <div className="dialog-actions">
+        <Button type="submit" variant="primary" disabled={submitting}>
+          {submitting ? "Creating…" : "Create user"}
+        </Button>
+      </div>
     </form>
   );
 }

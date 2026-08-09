@@ -1,21 +1,32 @@
 "use client";
 
+import { Plus, Search, UsersRound } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
 import { LeadBadges, sourceLabel, statusLabel } from "@/components/lead-badges";
 import { ResponseBadge } from "@/components/response-badge";
+import { Badge, Button, Card, EmptyState, InlineError } from "@/components/ui";
 import {
   api,
   errorDetail,
   LEAD_SOURCES,
   LEAD_STATUSES,
   type AssignableUser,
+  type Lead,
   type LeadList,
 } from "@/lib/api";
 import { formatDateTime } from "@/lib/datetime";
 
 const PAGE_SIZE = 25;
+
+const STATUS_TONES: Record<string, "blue" | "teal" | "green" | "amber" | "gray"> = {
+  new: "blue",
+  contacted: "teal",
+  qualified: "amber",
+  won: "green",
+  lost: "gray",
+};
 
 export default function LeadsPage() {
   const { user } = useAuth();
@@ -82,20 +93,40 @@ export default function LeadsPage() {
   }
 
   const totalPages = data === null ? 1 : Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+  const anyFilter =
+    query !== "" || status !== "" || source !== "" || assignee !== "" || archived || needsReview;
+
+  // Active filters as removable chips, so state is visible at a glance.
+  const chips: Array<{ key: string; label: string; clear: () => void }> = [];
+  if (query) chips.push({ key: "query", label: `Search: ${query}`, clear: () => { setQuery(""); setSearchInput(""); } });
+  if (status) chips.push({ key: "status", label: statusLabel(status), clear: () => setStatus("") });
+  if (source) chips.push({ key: "source", label: sourceLabel(source), clear: () => setSource("") });
+  if (assignee === "unassigned") {
+    chips.push({ key: "assignee", label: "Unassigned", clear: () => setAssignee("") });
+  } else if (assignee) {
+    const email = users.find((option) => option.id === assignee)?.email ?? "Assignee";
+    chips.push({ key: "assignee", label: email, clear: () => setAssignee("") });
+  }
+  if (archived) chips.push({ key: "archived", label: "Archived", clear: () => setArchived(false) });
+  if (needsReview) chips.push({ key: "review", label: "Needs review", clear: () => setNeedsReview(false) });
 
   return (
     <section>
-      <div className="page-head">
-        <h1>Leads</h1>
+      <header className="page-header">
+        <div className="page-header-text">
+          <h1>Leads</h1>
+          <p>Every request and customer, searchable in one place.</p>
+        </div>
         {canManage && (
           <Link className="button-link" href="/leads/new">
+            <Plus size={16} aria-hidden="true" />
             New lead
           </Link>
         )}
-      </div>
+      </header>
 
-      <form className="lead-filters" onSubmit={submitSearch}>
-        <div className="form-field">
+      <form className="toolbar" onSubmit={submitSearch}>
+        <div className="form-field" style={{ flex: "1 1 14rem" }}>
           <label htmlFor="lead-search">Search</label>
           <input
             id="lead-search"
@@ -190,74 +221,160 @@ export default function LeadsPage() {
             Needs review
           </label>
         </div>
-        <button type="submit">Search</button>
+        <Button type="submit" variant="primary">
+          <Search size={16} aria-hidden="true" />
+          Search
+        </Button>
       </form>
 
-      {error !== null && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
+      {chips.length > 0 && (
+        <div className="filter-chips" aria-label="Active filters">
+          {chips.map((chip) => (
+            <button
+              key={chip.key}
+              type="button"
+              onClick={() => {
+                setPage(1);
+                chip.clear();
+              }}
+            >
+              {chip.label} ✕
+            </button>
+          ))}
+        </div>
       )}
+
+      {error !== null && <InlineError>{error}</InlineError>}
       {loading && (
         <p className="page-status" role="status">
           Loading leads…
         </p>
       )}
+
       {!loading && data !== null && data.items.length === 0 && (
-        <p>No leads match these filters.</p>
+        <Card flush>
+          <EmptyState
+            icon={<UsersRound size={40} aria-hidden="true" />}
+            title={anyFilter ? "No leads match these filters" : "No leads yet"}
+            description={
+              anyFilter
+                ? "Try removing a filter, or search for something broader."
+                : "Leads arrive from the public form, SMS and calls — or add one yourself."
+            }
+            action={
+              canManage && !anyFilter ? (
+                <Link className="button-link" href="/leads/new">
+                  <Plus size={16} aria-hidden="true" />
+                  New lead
+                </Link>
+              ) : undefined
+            }
+          />
+        </Card>
       )}
+
       {!loading && data !== null && data.items.length > 0 && (
         <>
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Contact</th>
-                <th scope="col">Company</th>
-                <th scope="col">Status</th>
-                <th scope="col">Source</th>
-                <th scope="col">Assignee</th>
-                <th scope="col">Next follow-up</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.items.map((lead) => (
-                <tr key={lead.id}>
-                  <td>
-                    <Link href={`/leads/${lead.id}`}>{lead.name || "Unnamed lead"}</Link>{" "}
-                    <LeadBadges lead={lead} /> <ResponseBadge lead={lead} />
-                  </td>
-                  <td>
-                    {lead.email ?? "—"}
-                    <br />
-                    {lead.phone ?? "—"}
-                  </td>
-                  <td>{lead.company || "—"}</td>
-                  <td>{statusLabel(lead.status)}</td>
-                  <td>{sourceLabel(lead.source)}</td>
-                  <td>{lead.assignee_email ?? "Unassigned"}</td>
-                  <td>{formatDateTime(lead.next_follow_up_at)}</td>
+          <Card flush className="table-card">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col">Contact</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Source</th>
+                  <th scope="col">Assignee</th>
+                  <th scope="col">Next follow-up</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.items.map((lead) => (
+                  <tr key={lead.id}>
+                    <td>
+                      <Link href={`/leads/${lead.id}`} style={{ fontWeight: 600 }}>
+                        {lead.name || "Unnamed lead"}
+                      </Link>{" "}
+                      <LeadBadges lead={lead} showStatus={false} />{" "}
+                      <ResponseBadge lead={lead} />
+                      {lead.company !== "" && (
+                        <div className="cell-secondary">{lead.company}</div>
+                      )}
+                    </td>
+                    <td className="cell-secondary">
+                      {lead.email ?? "—"}
+                      <br />
+                      {lead.phone ?? "—"}
+                    </td>
+                    <td>
+                      <Badge tone={STATUS_TONES[lead.status] ?? "gray"}>
+                        {statusLabel(lead.status)}
+                      </Badge>
+                    </td>
+                    <td className="cell-secondary">{sourceLabel(lead.source)}</td>
+                    <td className="cell-secondary">{lead.assignee_email ?? "Unassigned"}</td>
+                    <td>
+                      <FollowUpCell lead={lead} />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+
+          <ul className="record-cards" aria-label="Leads">
+            {data.items.map((lead) => (
+              <li key={lead.id} className="record-card">
+                <span className="record-card-title">
+                  <Link href={`/leads/${lead.id}`}>{lead.name || "Unnamed lead"}</Link>
+                  <Badge tone={STATUS_TONES[lead.status] ?? "gray"}>
+                    {statusLabel(lead.status)}
+                  </Badge>
+                  <LeadBadges lead={lead} showStatus={false} />
+                  <ResponseBadge lead={lead} />
+                </span>
+                <span className="record-card-meta">
+                  {lead.email !== null && <span>{lead.email}</span>}
+                  {lead.phone !== null && <span>{lead.phone}</span>}
+                  <span>{sourceLabel(lead.source)}</span>
+                  <span>{lead.assignee_email ?? "Unassigned"}</span>
+                </span>
+                {lead.next_follow_up_at !== null && (
+                  <span className="record-card-meta">
+                    <FollowUpCell lead={lead} />
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+
           <nav className="pagination" aria-label="Lead pages">
-            <button type="button" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+            <Button size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
               Previous
-            </button>
+            </Button>
             <span>
-              Page {page} of {totalPages} ({data.total} leads)
+              Page {page} of {totalPages} · {data.total} leads
             </span>
-            <button
-              type="button"
-              disabled={page >= totalPages}
-              onClick={() => setPage(page + 1)}
-            >
+            <Button size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
               Next
-            </button>
+            </Button>
           </nav>
         </>
       )}
     </section>
+  );
+}
+
+function FollowUpCell({ lead }: { lead: Lead }) {
+  // A stable "now" per mount keeps this render pure; follow-up urgency does
+  // not need to tick live.
+  const [now] = useState(() => Date.now());
+  if (lead.next_follow_up_at === null) return <span className="cell-secondary">—</span>;
+  const due = new Date(lead.next_follow_up_at);
+  const overdue = !Number.isNaN(due.getTime()) && due.getTime() < now;
+  return (
+    <span style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+      {overdue && <Badge tone="amber">Overdue</Badge>}
+      <span className="cell-secondary">{formatDateTime(lead.next_follow_up_at)}</span>
+    </span>
   );
 }

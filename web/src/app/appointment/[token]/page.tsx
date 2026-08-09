@@ -1,7 +1,8 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { BrandMark, useBranding } from "@/components/brand-mark";
 
 /**
  * The customer's own view of one appointment.
@@ -50,6 +51,7 @@ export default function PublicAppointmentPage() {
   const params = useParams<{ token: string }>();
   const token = params.token;
   const endpoint = `/api/public-appointment/${encodeURIComponent(token)}`;
+  const branding = useBranding();
 
   const [appointment, setAppointment] = useState<PublicAppointment | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -113,35 +115,42 @@ export default function PublicAppointmentPage() {
     [endpoint],
   );
 
-  if (loadError !== null) {
-    return (
-      <main className="public-form">
-        <div className="public-card">
-          <h1>Appointment unavailable</h1>
-          <p role="alert">{loadError}</p>
-          <p>Please contact us and we will help.</p>
+  const shell = (children: ReactNode) => (
+    <main className="public-form">
+      <div className="public-card">
+        <div className="public-brand">
+          <BrandMark branding={branding} />
+          <span className="public-brand-name">
+            {appointment?.business_name ?? branding?.business_name ?? ""}
+          </span>
         </div>
-      </main>
+        {children}
+      </div>
+    </main>
+  );
+
+  if (loadError !== null) {
+    return shell(
+      <>
+        <h1>Appointment unavailable</h1>
+        <p role="alert">{loadError}</p>
+        <p>Please contact us and we will help.</p>
+      </>,
     );
   }
 
   if (appointment === null) {
-    return (
-      <main className="public-form">
-        <div className="public-card">
-          <p className="page-status" role="status">
-            Loading your appointment…
-          </p>
-        </div>
-      </main>
+    return shell(
+      <p className="page-status" role="status">
+        Loading your appointment…
+      </p>,
     );
   }
 
-  return (
-    <main className="public-form">
-      <div className="public-card">
+  return shell(
+    <>
         <h1>Your appointment with {appointment.business_name}</h1>
-        <p>
+        <div className="public-summary">
           <strong>
             {inZone(appointment.start_at, appointment.timezone, {
               weekday: "long",
@@ -152,12 +161,16 @@ export default function PublicAppointmentPage() {
               timeZoneName: "short",
             })}
           </strong>
-        </p>
-        <p>
-          {STATUS_TEXT[appointment.status] ?? appointment.status}
-          {appointment.staff_display_name !== null && <> · with {appointment.staff_display_name}</>}
-          {appointment.booking_reference !== "" && <> · reference {appointment.booking_reference}</>}
-        </p>
+          <span>
+            {STATUS_TEXT[appointment.status] ?? appointment.status}
+            {appointment.staff_display_name !== null && (
+              <> · with {appointment.staff_display_name}</>
+            )}
+            {appointment.booking_reference !== "" && (
+              <> · reference {appointment.booking_reference}</>
+            )}
+          </span>
+        </div>
 
         {notice !== null && (
           <p className="form-success" role="status">
@@ -258,7 +271,6 @@ export default function PublicAppointmentPage() {
             )}
           </>
         )}
-      </div>
-    </main>
+    </>,
   );
 }

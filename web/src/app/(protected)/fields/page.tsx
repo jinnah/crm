@@ -1,7 +1,18 @@
 "use client";
 
+import { ListChecks, Plus } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
+import {
+  Badge,
+  Button,
+  Card,
+  EmptyState,
+  FormDialog,
+  InlineError,
+  InlineSuccess,
+  PageHeader,
+} from "@/components/ui";
 import { api, errorDetail, type CustomField } from "@/lib/api";
 
 const FIELD_TYPES = ["text", "number", "date", "boolean", "select"] as const;
@@ -11,6 +22,7 @@ export default function FieldsPage() {
   const [fields, setFields] = useState<CustomField[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const isOwner = user.role === "owner";
@@ -34,10 +46,8 @@ export default function FieldsPage() {
   if (!isOwner) {
     return (
       <section>
-        <h1>Custom fields</h1>
-        <p className="form-error" role="alert">
-          You do not have access to custom-field management.
-        </p>
+        <PageHeader title="Custom fields" />
+        <InlineError>You do not have access to custom-field management.</InlineError>
       </section>
     );
   }
@@ -60,80 +70,101 @@ export default function FieldsPage() {
 
   return (
     <section>
-      <h1>Custom fields</h1>
-      <p>
-        Fields appear on lead screens. Deactivating a field hides it from forms but keeps
-        stored values.
-      </p>
-      {error !== null && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      {notice !== null && (
-        <p className="form-success" role="status">
-          {notice}
-        </p>
-      )}
+      <PageHeader
+        title="Custom fields"
+        description="Extra lead details for your trade. Deactivating a field hides it from forms but keeps stored values."
+        actions={
+          <Button variant="primary" onClick={() => setCreating(true)}>
+            <Plus size={16} aria-hidden="true" />
+            Create field
+          </Button>
+        }
+      />
+
+      {error !== null && <InlineError>{error}</InlineError>}
+      {notice !== null && <InlineSuccess>{notice}</InlineSuccess>}
+
       {fields === null ? (
         <p className="page-status" role="status">
           Loading fields…
         </p>
       ) : fields.length === 0 ? (
-        <p>No custom fields defined yet.</p>
+        <Card flush>
+          <EmptyState
+            icon={<ListChecks size={40} aria-hidden="true" />}
+            title="No custom fields yet"
+            description="Capture what matters for your work — roof type, system age, gate code — and it appears on every lead."
+            action={
+              <Button variant="primary" onClick={() => setCreating(true)}>
+                <Plus size={16} aria-hidden="true" />
+                Create field
+              </Button>
+            }
+          />
+        </Card>
       ) : (
-        <table className="data-table">
-          <thead>
-            <tr>
-              <th scope="col">Label</th>
-              <th scope="col">Key</th>
-              <th scope="col">Type</th>
-              <th scope="col">Required</th>
-              <th scope="col">Active</th>
-              <th scope="col">Order</th>
-            </tr>
-          </thead>
-          <tbody>
-            {fields.map((field) => (
-              <tr key={field.id}>
-                <td>{field.label}</td>
-                <td>
-                  <code>{field.key}</code>
-                </td>
-                <td>
-                  {field.type}
-                  {field.options !== null && ` (${field.options.join(", ")})`}
-                </td>
-                <td>
-                  <button
-                    type="button"
-                    onClick={() => void patchField(field, { required: !field.required })}
-                  >
-                    {field.required ? "Required" : "Optional"}
-                  </button>
-                </td>
-                <td>
-                  <button
-                    type="button"
-                    onClick={() => void patchField(field, { is_active: !field.is_active })}
-                  >
-                    {field.is_active ? "Active" : "Inactive"}
-                  </button>
-                </td>
-                <td>{field.display_order}</td>
+        <Card flush className="table-card">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th scope="col">Label</th>
+                <th scope="col">Key</th>
+                <th scope="col">Type</th>
+                <th scope="col">Required</th>
+                <th scope="col">Active</th>
+                <th scope="col">Order</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {fields.map((field) => (
+                <tr key={field.id}>
+                  <td style={{ fontWeight: 600 }}>{field.label}</td>
+                  <td>
+                    <code>{field.key}</code>
+                  </td>
+                  <td className="cell-secondary">
+                    {field.type}
+                    {field.options !== null && ` (${field.options.join(", ")})`}
+                  </td>
+                  <td>
+                    <Button
+                      size="sm"
+                      onClick={() => void patchField(field, { required: !field.required })}
+                    >
+                      {field.required ? "Required" : "Optional"}
+                    </Button>
+                  </td>
+                  <td>
+                    <Button
+                      size="sm"
+                      onClick={() => void patchField(field, { is_active: !field.is_active })}
+                    >
+                      {field.is_active ? (
+                        <Badge tone="green">Active</Badge>
+                      ) : (
+                        <Badge>Inactive</Badge>
+                      )}
+                    </Button>
+                  </td>
+                  <td className="cell-secondary">{field.display_order}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
       )}
-      <CreateFieldForm
-        csrfToken={csrfToken}
-        onCreated={(label) => {
-          setError(null);
-          setNotice(`Field "${label}" created.`);
-          setReloadNonce((value) => value + 1);
-        }}
-      />
+
+      <FormDialog open={creating} title="Create field" onClose={() => setCreating(false)}>
+        <CreateFieldForm
+          csrfToken={csrfToken}
+          onCreated={(label) => {
+            setError(null);
+            setNotice(`Field "${label}" created.`);
+            setCreating(false);
+            setReloadNonce((value) => value + 1);
+          }}
+        />
+      </FormDialog>
     </section>
   );
 }
@@ -191,8 +222,7 @@ function CreateFieldForm({
   }
 
   return (
-    <form className="narrow-form" onSubmit={handleSubmit} noValidate>
-      <h2>New field</h2>
+    <form onSubmit={handleSubmit} noValidate>
       <div className="form-field">
         <label htmlFor="field-label">Label</label>
         <input
@@ -212,7 +242,8 @@ function CreateFieldForm({
           onChange={(event) => setKey(event.target.value)}
         />
         <p id="field-key-help" className="form-help">
-          Lowercase letters, digits and underscores. Cannot be changed later.
+          Lowercase letters, digits and underscores. The key is permanent — it cannot be changed
+          after the field is created.
         </p>
       </div>
       <div className="form-field">
@@ -259,14 +290,12 @@ function CreateFieldForm({
           onChange={(event) => setOrder(Number(event.target.value))}
         />
       </div>
-      {error !== null && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      <button type="submit" disabled={submitting}>
-        {submitting ? "Creating…" : "Create field"}
-      </button>
+      {error !== null && <InlineError>{error}</InlineError>}
+      <div className="dialog-actions">
+        <Button type="submit" variant="primary" disabled={submitting}>
+          {submitting ? "Creating…" : "Create field"}
+        </Button>
+      </div>
     </form>
   );
 }

@@ -2,14 +2,16 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
 import { makeUser, stubFetchRoutes } from "@/test/helpers";
 import ProtectedLayout from "../layout";
-import CommunicationSettingsPage from "./page";
+import SettingsPage from "./page";
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
 }));
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 const SETTINGS = {
@@ -52,130 +54,159 @@ const SCHEDULING = {
   },
 };
 
-function renderSettings(
-  role: "owner" | "manager" = "owner",
-  save: { status: number; body: unknown } = { status: 200, body: SETTINGS },
-) {
+const BRANDING = {
+  business_name: "Acme Roofing",
+  has_logo: false,
+  width: null,
+  height: null,
+  updated_at: null,
+  initials: "AR",
+};
+
+function renderSettings(role: "owner" | "manager" = "owner") {
   const fetchMock = stubFetchRoutes([
     ["/auth/session", { status: 200, body: { user: makeUser({ role }), csrf_token: "csrf" } }],
     ["/settings/communication", { status: 200, body: SETTINGS }],
     ["/settings/scheduling", { status: 200, body: SCHEDULING }],
+    ["/settings/branding", { status: 200, body: BRANDING }],
   ]);
   render(
     <ProtectedLayout>
-      <CommunicationSettingsPage />
+      <SettingsPage />
     </ProtectedLayout>,
   );
-  return { fetchMock, save };
+  return fetchMock;
 }
 
-test("owner sees the messaging configuration", async () => {
+function patchCalls(fetchMock: ReturnType<typeof renderSettings>, fragment: string) {
+  return fetchMock.mock.calls.filter(
+    ([url, init]) =>
+      String(url).includes(fragment) && (init as RequestInit | undefined)?.method === "PATCH",
+  );
+}
+
+test("owner lands on Business & branding with the section navigation", async () => {
   renderSettings();
   expect(await screen.findByLabelText("Business display name")).toHaveValue("Acme Roofing");
-  expect(screen.getByLabelText("Public form title")).toHaveValue("Request a quote");
-  expect(screen.getByLabelText(/Send an automatic acknowledgment/)).not.toBeChecked();
-  expect(screen.getByLabelText("Notification destination phone")).toHaveValue("");
-  expect(screen.getByLabelText("First-response target (minutes)")).toHaveValue(5);
-  expect(screen.getAllByText(/\{\{lead_name\}\}/).length).toBeGreaterThan(0);
+  // All sections are reachable from one navigator.
+  const tabs = screen.getAllByRole("tab").map((tab) => tab.textContent);
+  expect(tabs).toEqual([
+    "Business & branding",
+    "Lead intake",
+    "Automated messages",
+    "Response targets",
+    "Scheduling rules",
+    "Availability",
+    "Appointment notifications",
+  ]);
+  // The branding manager is on the first section.
+  expect(await screen.findByText(/Drag an image here/)).toBeInTheDocument();
+  // Scheduling fields are not on this section.
+  expect(screen.queryByLabelText("Business time zone")).not.toBeInTheDocument();
 });
 
 test("non-owners are refused access", async () => {
   renderSettings("manager");
   expect(await screen.findByRole("alert")).toHaveTextContent(
-    "You do not have access to communication settings.",
+    "You do not have access to settings.",
   );
   expect(screen.queryByLabelText("Business display name")).not.toBeInTheDocument();
 });
 
-test("saves changes with the CSRF token", async () => {
-  const { fetchMock } = renderSettings();
-  fireEvent.change(await screen.findByLabelText("Business display name"), {
-    target: { value: "Acme Roofing and Gutters" },
-  });
-  fireEvent.click(screen.getByLabelText(/Send an automatic acknowledgment/));
-  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+test("saving a section sends only its fields, with the CSRF token", async () => {
+  const fetchMock = renderSettings();
+  const field = await screen.findByLabelText("Business display name");
+  const save = screen.getByRole("button", { name: "Save business profile" });
+  expect(save).toBeDisabled(); // nothing changed yet
+
+  fireEvent.change(field, { target: { value: "Acme Roofing and Gutters" } });
+  expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save business profile" }));
 
   await waitFor(() => {
-    const patch = fetchMock.mock.calls.find(
-      ([, init]) => (init as RequestInit | undefined)?.method === "PATCH",
-    );
-    expect(patch).toBeDefined();
-    const body = JSON.parse(String((patch![1] as RequestInit).body));
-    expect(body.business_name).toBe("Acme Roofing and Gutters");
-    expect(body.acknowledgment_enabled).toBe(true);
-    expect((patch![1] as RequestInit).headers).toMatchObject({ "X-CSRF-Token": "csrf" });
+    const patches = patchCalls(fetchMock, "/settings/communication");
+    expect(patches).toHaveLength(1);
+    const [, init] = patches[0];
+    const body = JSON.parse(String((init as RequestInit).body));
+    expect(body).toEqual({ business_name: "Acme Roofing and Gutters" });
+    expect((init as RequestInit).headers).toMatchObject({ "X-CSRF-Token": "csrf" });
   });
 });
 
-test("surfaces a server validation error", async () => {
-  const fetchMock = vi.fn((...args: Parameters<typeof fetch>) => {
-    const url = String(args[0]);
+test("switching sections with unsaved changes asks for confirmation", async () => {
+  renderSettings();
+  const field = await screen.findByLabelText("Business display name");
+  fireEvent.change(field, { target: { value: "Edited" } });
+
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  fireEvent.click(screen.getByRole("tab", { name: "Scheduling rules" }));
+  expect(confirm).toHaveBeenCalled();
+  // Declining stays on the section with the edit intact.
+  expect(screen.getByLabelText("Business display name")).toHaveValue("Edited");
+
+  confirm.mockReturnValue(true);
+  fireEvent.click(screen.getByRole("tab", { name: "Scheduling rules" }));
+  expect(await screen.findByLabelText("Business time zone")).toHaveValue("America/New_York");
+});
+
+test("template sections disable their editors until the toggle is on", async () => {
+  renderSettings();
+  await screen.findByLabelText("Business display name");
+  fireEvent.click(screen.getByRole("tab", { name: "Automated messages" }));
+
+  const template = await screen.findByLabelText("Acknowledgment message");
+  expect(template).toBeDisabled(); // acknowledgment_enabled is false
+  fireEvent.click(screen.getByLabelText(/Send an automatic acknowledgment/));
+  expect(screen.getByLabelText("Acknowledgment message")).toBeEnabled();
+  // Variables are offered as insertable chips with a character counter.
+  expect(screen.getAllByRole("button", { name: "{{lead_name}}" }).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/\/ 1600/).length).toBeGreaterThan(0);
+});
+
+test("a server validation error is surfaced on save", async () => {
+  const fetchMock = renderSettings();
+  const field = await screen.findByLabelText("Business display name");
+
+  // From here on, every PATCH is rejected while reads keep working.
+  const passthrough = fetchMock.getMockImplementation()!;
+  fetchMock.mockImplementation((...args: Parameters<typeof fetch>) => {
     const init = args[1] as RequestInit | undefined;
-    if (url.includes("/auth/session")) {
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ user: makeUser({ role: "owner" }), csrf_token: "csrf" }),
-      });
-    }
     if (init?.method === "PATCH") {
       return Promise.resolve({
         ok: false,
         status: 400,
-        json: () =>
-          Promise.resolve({ detail: "Unknown template variables: secret_field" }),
+        json: () => Promise.resolve({ detail: "Unknown template variables: secret_field" }),
       });
     }
-    if (url.includes("/settings/scheduling")) {
-      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SCHEDULING) });
-    }
-    return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(SETTINGS) });
+    return passthrough(...args);
   });
-  vi.stubGlobal("fetch", fetchMock);
 
-  render(
-    <ProtectedLayout>
-      <CommunicationSettingsPage />
-    </ProtectedLayout>,
-  );
-  fireEvent.click(await screen.findByRole("button", { name: "Save settings" }));
+  fireEvent.change(field, { target: { value: "Changed" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save business profile" }));
   await waitFor(() =>
     expect(screen.getByRole("alert")).toHaveTextContent("Unknown template variables"),
   );
 });
 
-test("owner sees the scheduling configuration alongside messaging", async () => {
-  renderSettings();
-  expect(await screen.findByLabelText("Business time zone")).toHaveValue("America/New_York");
-  expect(screen.getByLabelText("Default appointment length (minutes)")).toHaveValue(60);
-  expect(screen.getByLabelText("Buffer after an appointment (minutes)")).toHaveValue(15);
-  expect(screen.getByLabelText(/Let customers book/)).toBeChecked();
-  expect(screen.getByLabelText("Monday opens")).toHaveValue("09:00");
-  // Closed days are shown as closed, not as an empty window.
-  expect(screen.getByLabelText("Saturday", { selector: "input" })).not.toBeChecked();
-  expect(screen.getAllByText(/\{\{appointment_date\}\}/).length).toBeGreaterThan(0);
-});
+test("availability edits save through the weekday editor", async () => {
+  const fetchMock = renderSettings();
+  await screen.findByLabelText("Business display name");
+  fireEvent.click(screen.getByRole("tab", { name: "Availability" }));
 
-test("saves scheduling changes, turning a closed day into an open window", async () => {
-  const { fetchMock } = renderSettings();
-  fireEvent.change(await screen.findByLabelText("Business time zone"), {
-    target: { value: "America/Chicago" },
-  });
-  fireEvent.click(screen.getByLabelText("Saturday", { selector: "input" }));
+  // Saturday is closed; opening it produces a real window, not raw text.
+  const saturday = await screen.findByLabelText("Saturday", { selector: "input" });
+  expect(saturday).not.toBeChecked();
+  fireEvent.click(saturday);
   fireEvent.change(screen.getByLabelText("Saturday opens"), { target: { value: "10:00" } });
-  fireEvent.click(screen.getByRole("button", { name: "Save scheduling settings" }));
+  fireEvent.click(screen.getByRole("button", { name: "Save availability" }));
 
   await waitFor(() => {
-    const patch = fetchMock.mock.calls.find(
-      ([url, init]) =>
-        (init as RequestInit | undefined)?.method === "PATCH" &&
-        String(url).includes("/settings/scheduling"),
-    );
-    expect(patch).toBeDefined();
-    const body = JSON.parse(String((patch![1] as RequestInit).body));
-    expect(body.business_timezone).toBe("America/Chicago");
+    const patches = patchCalls(fetchMock, "/settings/scheduling");
+    expect(patches).toHaveLength(1);
+    const body = JSON.parse(String((patches[0][1] as RequestInit).body));
+    expect(Object.keys(body)).toEqual(["business_hours"]);
     expect(body.business_hours.sat).toEqual([["10:00", "17:00"]]);
     expect(body.business_hours.sun).toEqual([]);
-    expect((patch![1] as RequestInit).headers).toMatchObject({ "X-CSRF-Token": "csrf" });
+    expect(body.business_hours.mon).toEqual([["09:00", "17:00"]]);
   });
 });

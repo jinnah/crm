@@ -5,6 +5,7 @@ import ProtectedLayout from "./layout";
 
 const { replace } = vi.hoisted(() => ({ replace: vi.fn() }));
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace, push: vi.fn(), refresh: vi.fn() }),
 }));
 

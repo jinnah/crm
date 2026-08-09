@@ -1,7 +1,8 @@
 "use client";
 
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { BrandMark, useBranding } from "@/components/brand-mark";
 
 /**
  * Public booking page.
@@ -57,6 +58,7 @@ function inZone(iso: string, timeZone: string, options: Intl.DateTimeFormatOptio
 export default function PublicBookingPage() {
   const params = useParams<{ token: string }>();
   const token = params.token;
+  const branding = useBranding();
 
   const [info, setInfo] = useState<BookingInfo | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -121,24 +123,36 @@ export default function PublicBookingPage() {
     }
   }
 
-  if (loadError !== null) {
-    return (
-      <main className="public-form">
-        <div className="public-card">
-          <h1>Booking unavailable</h1>
-          <p role="alert">{loadError}</p>
-          <p>Please contact us and we will arrange a new time.</p>
+  const shell = (children: ReactNode) => (
+    <main className="public-form">
+      <div className="public-card">
+        <div className="public-brand">
+          <BrandMark branding={branding} />
+          <span className="public-brand-name">
+            {info?.business_name ?? branding?.business_name ?? ""}
+          </span>
         </div>
-      </main>
+        {children}
+      </div>
+    </main>
+  );
+
+  if (loadError !== null) {
+    return shell(
+      <>
+        <h1>Booking unavailable</h1>
+        <p role="alert">{loadError}</p>
+        <p>Please contact us and we will arrange a new time.</p>
+      </>,
     );
   }
 
   if (result !== null) {
-    return (
-      <main className="public-form">
-        <div className="public-card">
-          <h1>{result.duplicate ? "You are already booked" : "Appointment confirmed"}</h1>
-          <p role="status">
+    return shell(
+      <>
+        <h1>{result.duplicate ? "You are already booked" : "Appointment confirmed"}</h1>
+        <div className="public-summary">
+          <strong role="status">
             {inZone(result.start_at, result.timezone, {
               weekday: "long",
               day: "numeric",
@@ -147,105 +161,108 @@ export default function PublicBookingPage() {
               minute: "2-digit",
               timeZoneName: "short",
             })}
-          </p>
-          <p>
+          </strong>
+          <span>
             Your reference is <strong>{result.booking_reference}</strong>.
-          </p>
-          <p>We will send a confirmation by text message.</p>
-          {result.manage_token ? (
-            <p>
-              <a href={`/appointment/${encodeURIComponent(result.manage_token)}`}>
-                Change or cancel this appointment
-              </a>{" "}
-              — keep this link, it is the only way to manage the booking.
-            </p>
-          ) : null}
+          </span>
         </div>
-      </main>
+        <p>We will send a confirmation by text message.</p>
+        {result.manage_token ? (
+          <p>
+            <a href={`/appointment/${encodeURIComponent(result.manage_token)}`}>
+              Change or cancel this appointment
+            </a>{" "}
+            — keep this link, it is the only way to manage the booking.
+          </p>
+        ) : null}
+      </>,
     );
   }
 
   if (info === null) {
-    return (
-      <main className="public-form">
-        <div className="public-card">
-          <p className="page-status" role="status">
-            Loading available times…
-          </p>
-        </div>
-      </main>
+    return shell(
+      <p className="page-status" role="status">
+        Loading available times…
+      </p>,
     );
   }
 
-  return (
-    <main className="public-form">
-      <div className="public-card">
-        <h1>Book with {info.business_name}</h1>
-        {info.intro ? <p>{info.intro}</p> : null}
-        <p>
-          {info.duration_minutes} minutes
-          {info.staff_display_name !== null && <> with {info.staff_display_name}</>} · times shown
-          in {info.timezone}
+  return shell(
+    <>
+      <h1>Book with {info.business_name}</h1>
+      {info.intro ? <p>{info.intro}</p> : null}
+      <p className="form-help">
+        {info.duration_minutes} minutes
+        {info.staff_display_name !== null && <> with {info.staff_display_name}</>} · times shown
+        in {info.timezone}
+      </p>
+
+      <p className="public-step">Step 1 · Choose a time</p>
+      {info.days.length === 0 ? (
+        <p role="status">
+          There are no free times at the moment. Please contact us and we will find one.
         </p>
+      ) : (
+        info.days.map((day) => (
+          <fieldset key={day.date} className="slot-list">
+            <legend>
+              {inZone(`${day.date}T12:00:00Z`, "UTC", {
+                weekday: "long",
+                day: "numeric",
+                month: "long",
+              })}
+            </legend>
+            <div className="slot-options">
+              {day.slots.map((slot) => (
+                <label
+                  key={slot}
+                  className={slot === selected ? "slot-option selected" : "slot-option"}
+                >
+                  <input
+                    type="radio"
+                    name="booking-slot"
+                    value={slot}
+                    checked={slot === selected}
+                    onChange={() => setSelected(slot)}
+                  />
+                  {inZone(slot, day.timezone, { hour: "2-digit", minute: "2-digit" })}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        ))
+      )}
 
-        {info.days.length === 0 ? (
-          <p role="status">
-            There are no free times at the moment. Please contact us and we will find one.
-          </p>
-        ) : (
-          info.days.map((day) => (
-            <fieldset key={day.date} className="slot-list">
-              <legend>
-                {inZone(`${day.date}T12:00:00Z`, "UTC", {
-                  weekday: "long",
-                  day: "numeric",
-                  month: "long",
-                })}
-              </legend>
-              <div className="slot-options">
-                {day.slots.map((slot) => (
-                  <label
-                    key={slot}
-                    className={slot === selected ? "slot-option selected" : "slot-option"}
-                  >
-                    <input
-                      type="radio"
-                      name="booking-slot"
-                      value={slot}
-                      checked={slot === selected}
-                      onChange={() => setSelected(slot)}
-                    />
-                    {inZone(slot, day.timezone, { hour: "2-digit", minute: "2-digit" })}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-          ))
-        )}
+      {/* Honeypot: hidden from people, tempting to bots. */}
+      <div className="honeypot" aria-hidden="true">
+        <label htmlFor="booking-website">Leave this field empty</label>
+        <input
+          id="booking-website"
+          tabIndex={-1}
+          autoComplete="off"
+          value={website}
+          onChange={(event) => setWebsite(event.target.value)}
+        />
+      </div>
 
-        {/* Honeypot: hidden from people, tempting to bots. */}
-        <div className="honeypot" aria-hidden="true">
-          <label htmlFor="booking-website">Leave this field empty</label>
-          <input
-            id="booking-website"
-            tabIndex={-1}
-            autoComplete="off"
-            value={website}
-            onChange={(event) => setWebsite(event.target.value)}
-          />
-        </div>
-
-        {error !== null && (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
-        )}
-        {info.days.length > 0 && (
-          <button type="button" disabled={submitting} onClick={() => void book()}>
+      {error !== null && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {info.days.length > 0 && (
+        <>
+          <p className="public-step">Step 2 · Confirm</p>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={submitting}
+            onClick={() => void book()}
+          >
             {submitting ? "Booking…" : "Confirm booking"}
           </button>
-        )}
-      </div>
-    </main>
+        </>
+      )}
+    </>,
   );
 }

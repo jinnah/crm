@@ -15,14 +15,14 @@ export function ResponseBadge({ lead }: { lead: Lead }) {
     const seconds = lead.first_response_seconds;
     const met = lead.response_target_met;
     return (
-      <span className={`response-badge${met === false ? " response-late" : ""}`}>
+      <span className={`badge ${met === false ? "badge-amber" : "badge-green"}`}>
         Responded{seconds !== null ? ` in ${formatDuration(seconds)}` : ""}
         {met === false ? " (late)" : ""}
       </span>
     );
   }
   if (lead.response_overdue) {
-    return <span className="response-badge response-late">Response overdue</span>;
+    return <span className="badge badge-red">Response overdue</span>;
   }
-  return <span className="response-badge">Awaiting first response</span>;
+  return <span className="badge badge-blue">Awaiting first response</span>;
 }

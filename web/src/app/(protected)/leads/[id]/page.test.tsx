@@ -7,6 +7,7 @@ import LeadDetailPage from "./page";
 const LEAD_ID = "aaaaaaaa-0000-0000-0000-000000000001";
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
   useParams: () => ({ id: LEAD_ID }),
 }));

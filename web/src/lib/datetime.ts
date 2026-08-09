@@ -75,6 +75,25 @@ export function dayKeyInZone(iso: string, timeZone: string): string {
   }
 }
 
+/** Minutes since the business-local midnight an instant falls at (0–1439). */
+export function minutesInZone(iso: string, timeZone: string): number {
+  const value = new Date(iso);
+  if (Number.isNaN(value.getTime())) return 0;
+  try {
+    const parts = new Intl.DateTimeFormat("en-GB", {
+      timeZone,
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(value);
+    const hour = Number(parts.find((part) => part.type === "hour")?.value ?? 0);
+    const minute = Number(parts.find((part) => part.type === "minute")?.value ?? 0);
+    return hour * 60 + minute;
+  } catch {
+    return value.getUTCHours() * 60 + value.getUTCMinutes();
+  }
+}
+
 /** Shift a YYYY-MM-DD day string by whole days without crossing into local time. */
 export function addDays(day: string, delta: number): string {
   const parsed = new Date(`${day}T00:00:00Z`);

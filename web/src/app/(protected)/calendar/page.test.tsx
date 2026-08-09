@@ -6,6 +6,7 @@ import ProtectedLayout from "../layout";
 import CalendarPage from "./page";
 
 vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
   useRouter: () => ({ replace: vi.fn(), push: vi.fn(), refresh: vi.fn() }),
 }));
 
@@ -77,19 +78,24 @@ function appointmentQueries(fetchMock: ReturnType<typeof renderCalendar>) {
     .filter((url) => url.includes("/appointments?"));
 }
 
-test("shows the week around today with each appointment on its own day", async () => {
+test("the week grid places each appointment by its start time and duration", async () => {
   // 2026-08-20 is a Thursday; the week view must therefore render seven days.
   vi.setSystemTime(new Date("2026-08-18T09:00:00Z"));
   renderCalendar([appointment()]);
   expect(await screen.findByRole("heading", { name: "Calendar" })).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByRole("link", { name: "Pat Customer" })).toBeInTheDocument());
-  expect(screen.getByRole("link", { name: "Pat Customer" })).toHaveAttribute(
-    "href",
-    "/leads/aaaaaaaa-0000-0000-0000-000000000001",
-  );
+
+  const block = await screen.findByRole("link", { name: /Pat Customer/ });
+  expect(block).toHaveAttribute("href", "/leads/aaaaaaaa-0000-0000-0000-000000000001");
+  // No business hours configured: the grid runs 07:00-19:00, so a 14:00 UTC
+  // start sits 7 hours down and a one-hour job is one hour-row tall.
+  expect((block as HTMLElement).style.top).toBe("24.5rem");
+  expect((block as HTMLElement).style.height).toBe("3.5rem");
+
   expect(screen.getByText(/Times are shown in UTC/)).toBeInTheDocument();
-  expect(screen.getAllByRole("heading", { level: 2 })).toHaveLength(7);
-  expect(screen.getAllByText("Nothing scheduled.").length).toBe(6);
+  // A time axis with hour labels, and seven day columns.
+  expect(screen.getByText("07:00")).toBeInTheDocument();
+  expect(document.querySelectorAll(".day-column").length).toBe(7);
+  expect(document.querySelectorAll(".time-grid-head > div").length).toBe(8); // axis + 7 days
   vi.useRealTimers();
 });
 
@@ -136,10 +142,13 @@ test("the agenda view lists appointments in time order", async () => {
   vi.useRealTimers();
 });
 
-test("a canceled appointment is still shown, marked as canceled", async () => {
+test("a canceled appointment is still shown, visibly canceled", async () => {
   vi.setSystemTime(new Date("2026-08-18T09:00:00Z"));
   renderCalendar([appointment({ status: "canceled" })]);
-  await waitFor(() => expect(screen.getByText(/Canceled/)).toBeInTheDocument());
+  const block = await screen.findByRole("link", { name: /Pat Customer/ });
+  // The status is part of the accessible name, not conveyed by color alone.
+  expect(block).toHaveAccessibleName(/Canceled/);
+  expect(block.className).toContain("status-canceled");
   vi.useRealTimers();
 });
 

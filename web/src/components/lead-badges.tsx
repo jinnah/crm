@@ -8,12 +8,31 @@ export function sourceLabel(source: string): string {
   return source.replace(/_/g, " ");
 }
 
-export function LeadBadges({ lead }: { lead: Lead }) {
+const STATUS_BADGE_TONES: Record<string, string> = {
+  new: "badge-blue",
+  contacted: "badge-teal",
+  qualified: "badge-amber",
+  won: "badge-green",
+  lost: "",
+};
+
+export function LeadBadges({
+  lead,
+  showStatus = true,
+}: {
+  lead: Lead;
+  /** Off when a dedicated status column already shows it. */
+  showStatus?: boolean;
+}) {
   return (
     <span className="lead-badges">
-      <span className={`badge badge-status-${lead.status}`}>{statusLabel(lead.status)}</span>
-      {lead.needs_review && <span className="badge badge-review">Needs review</span>}
-      {lead.archived_at !== null && <span className="badge badge-archived">Archived</span>}
+      {showStatus && (
+        <span className={`badge ${STATUS_BADGE_TONES[lead.status] ?? ""}`.trim()}>
+          {statusLabel(lead.status)}
+        </span>
+      )}
+      {lead.needs_review && <span className="badge badge-amber">Needs review</span>}
+      {lead.archived_at !== null && <span className="badge">Archived</span>}
     </span>
   );
 }
