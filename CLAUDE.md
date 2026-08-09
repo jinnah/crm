@@ -39,9 +39,11 @@ Do not introduce: microservices, Kubernetes, message brokers, extra frontends, s
 
 ## Current phase
 
-**Phase 0 complete — awaiting lead-architect review.** Foundation only: scaffolding, health endpoint, Docker Compose, tooling. No CRM features exist yet.
+**Phase 1 complete — awaiting lead-architect review.** Phase 0 (foundation) approved. Phase 1 adds authentication and user access: email/password login with Argon2id hashing, opaque server-side sessions in HttpOnly cookies (peppered HMAC digests, 8h inactivity / 7d absolute), session-bound CSRF synchronizer tokens, Origin validation, in-memory login/recovery rate limiting, SMTP password recovery (30-minute single-use tokens), owner/manager/team_member roles enforced in services, forced first-login password change, owner-only user management (no hard deletes, last-active-owner protection), interactive CLI owner bootstrap and emergency reset, and the protected CRM shell.
 
-Deferred to later phases: auth/users/roles, CRM navigation, leads and statuses, custom fields, embedded form, n8n workflows, Twilio, Gmail/Outlook, notes/follow-ups, activity history, Sheets integration and import, production deployment automation. No Alembic migrations exist yet (no schema).
+Phase 1 rules: no public registration, no MFA/OAuth/social login/magic links, no JWTs or browser-storage auth, no Redis or background workers, password policy is 12–128 chars with no composition rules, generic errors for login/recovery (no account enumeration), never store or log raw tokens or plaintext passwords.
+
+Deferred to later phases: leads and statuses, custom fields, embedded form, n8n workflows, Twilio, Gmail/Outlook, notes/follow-ups, activity history, Sheets integration and import, production deployment automation.
 
 ## Validation commands
 
@@ -50,6 +52,12 @@ Deferred to later phases: auth/users/roles, CRM navigation, leads and statuses, 
 - Compose: `docker compose config -q && docker compose up -d --build`
 - Health: `GET http://localhost:8000/api/v1/health`
 
-## Process rule
+## Process rules
 
 Implementation proceeds in phases. **Stop at the end of each phase for lead-architect review; do not begin the next phase without explicit approval.**
+
+- Work directly on `main` — no feature branches or pull requests. Before starting a phase, fetch and confirm local `main` fast-forwards cleanly; stop and report if it cannot.
+- Commit and push to `origin/main` only after all applicable validation passes. Never force-push, amend reviewed commits, or rewrite history.
+- After pushing a completed phase, stop and report: commit SHA and URL, changed files, validation results, unresolved issues, and clean `git status`.
+- Keep documentation minimal: only this file, the root `README.md`, and framework-required agent instruction files. No `docs/` directory, ADRs, planning documents, or implementation journals unless the lead architect requests them. Update docs only when commands, configuration, or operational instructions materially change.
+- Keep each phase narrowly scoped: no early features, no speculative abstractions or dependencies. Report unrelated problems instead of silently expanding scope.

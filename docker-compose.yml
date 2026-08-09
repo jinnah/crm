@@ -21,6 +21,15 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-crm}:${POSTGRES_PASSWORD:-crm-dev-password}@db:5432/${POSTGRES_DB:-crm}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       CORS_ORIGINS: ${CORS_ORIGINS:-["http://localhost:3000"]}
+      SESSION_TOKEN_PEPPER: ${SESSION_TOKEN_PEPPER:-dev-only-pepper-not-for-production}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_SENDER: ${SMTP_SENDER:-}
+      SMTP_TLS: ${SMTP_TLS:-starttls}
     ports:
       - "8000:8000"
     depends_on:

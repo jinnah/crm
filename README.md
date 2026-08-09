@@ -41,6 +41,14 @@ cp .env.example api/.env    # used by the API when run outside Docker
 
 All values in `.env.example` are safe local placeholders. Never commit `.env` files or real credentials. `NEXT_PUBLIC_*` variables are exposed to the browser — never put secrets in them.
 
+For production, generate `SESSION_TOKEN_PEPPER` outside source control and keep it secret:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Production also requires `SESSION_COOKIE_SECURE=true`; the API refuses to start with placeholder secrets. Password-recovery email needs the `SMTP_*` settings; with `SMTP_HOST` empty (local default), reset emails are skipped safely.
+
 ## Development
 
 Run PostgreSQL in Docker, the apps directly:
@@ -91,7 +99,29 @@ uv run alembic revision --autogenerate -m "message"  # create a migration
 uv run alembic downgrade -1                          # roll back one
 ```
 
-No migrations exist yet — the first will arrive with the Phase 1 schema.
+Inside Docker Compose:
+
+```bash
+docker compose exec api uv run --frozen --no-dev alembic upgrade head
+```
+
+## Account administration
+
+There is no public registration. After applying migrations, create the first owner account (interactive prompts; the password uses hidden input and is never passed as an argument):
+
+```bash
+cd api && uv run python -m app.cli create-owner
+```
+
+Emergency password reset for any account (sets a temporary password, revokes the user's sessions, forces a change at next login):
+
+```bash
+cd api && uv run python -m app.cli reset-password
+```
+
+Inside Docker Compose, prefix with `docker compose exec api` and use `uv run --frozen --no-dev` instead of `uv run`.
+
+The owner account created at first login must change its temporary password before entering the CRM. Further users are created by an owner from the CRM's user-management page.
 
 ## Shutdown and cleanup
 

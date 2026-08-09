@@ -47,3 +47,186 @@ a {
     color-scheme: dark;
   }
 }
+
+/* Shared form and layout styles for the authentication pages and CRM shell. */
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.page-status {
+  padding: 2rem;
+}
+
+.auth-page {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 24rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1.5rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  border-radius: 8px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.5rem;
+}
+
+.form-field input,
+.form-field select {
+  padding: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.form-help {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.form-error {
+  color: #b3261e;
+  font-weight: 500;
+}
+
+@media (prefers-color-scheme: dark) {
+  .form-error {
+    color: #ff8a80;
+  }
+}
+
+.form-success {
+  font-weight: 500;
+}
+
+button {
+  padding: 0.5rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--foreground);
+  color: var(--background);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.auth-links {
+  font-size: 0.9rem;
+  text-decoration: underline;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.shell-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+}
+
+.shell-brand {
+  font-weight: 700;
+}
+
+.shell-nav {
+  display: flex;
+  gap: 1rem;
+}
+
+.shell-nav a {
+  text-decoration: underline;
+}
+
+.shell-user {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.shell-identity {
+  font-size: 0.9rem;
+  opacity: 0.85;
+}
+
+.shell-main {
+  flex: 1;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.shell-main h1 {
+  margin-bottom: 0.5rem;
+}
+
+.users-table {
+  border-collapse: collapse;
+  margin: 1rem 0;
+}
+
+.users-table th,
+.users-table td {
+  text-align: left;
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--foreground) 20%, transparent);
+  vertical-align: top;
+}
+
+.users-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.inline-form input {
+  padding: 0.4rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 35%, transparent);
+  border-radius: 4px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.create-user-form {
+  max-width: 24rem;
+  margin-top: 1rem;
+}
