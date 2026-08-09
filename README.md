@@ -105,6 +105,14 @@ Inside Docker Compose:
 docker compose exec api uv run --frozen --no-dev alembic upgrade head
 ```
 
+### If you already applied an earlier `f93c51bfa8ee`
+
+An earlier form of this migration kept the **oldest** `communication_settings` row and deleted the rest, so a database that ran it may have lost settings that lived on a newer duplicate row. Deleted rows cannot be reconstructed from the database — restore from a backup taken before the upgrade, or re-enter the values under **Settings** in the CRM. The current migration is configuration-aware and aborts rather than choosing between conflicting rows. To confirm what a database now holds:
+
+```bash
+docker compose exec db psql -U crm -d crm -c "SELECT id, business_name, alert_destination_phone, response_target_minutes FROM communication_settings;"
+```
+
 ## Account administration
 
 There is no public registration. After applying migrations, create the first owner account (interactive prompts; the password uses hidden input and is never passed as an argument):

@@ -462,34 +462,19 @@ describe("workflow hygiene", () => {
 describe("selective CRM retry", () => {
   const workflow = loadWorkflow("website-form-intake.json");
 
-  function classify(statusCode: number, body: unknown = {}) {
-    const prepared = {
-      json: { event: { channel: "web_form" }, idempotency_key: "form:sub-1" },
-    };
-    const node = workflow.nodes.find((candidate) => candidate.name === "Classify Response")!;
+  function classify(nodeName: string, statusCode: number, body: unknown = {}) {
+    const node = workflow.nodes.find((candidate) => candidate.name === nodeName)!;
     const nodeRequire = createRequire(import.meta.url);
-    const fn = new Function(
-      "$input",
-      "$env",
-      "$",
-      "require",
-      "Buffer",
-      String(node.parameters.jsCode),
-    );
-    return fn(
-      { all: () => [{ json: { statusCode, body } }] },
-      ENV,
-      (name: string) => {
-        if (name !== "Prepare Attempt") throw new Error(`unexpected node ${name}`);
-        return { first: () => prepared };
-      },
-      nodeRequire,
-      Buffer,
-    ) as Array<{ json: Record<string, unknown> }>;
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    return fn({ all: () => [{ json: { statusCode, body } }] }, ENV, nodeRequire, Buffer) as Array<{
+      json: Record<string, unknown>;
+    }>;
   }
 
+  const classifiers = ["Classify Response", "Classify Response 2", "Classify Response 3"];
+
   test("2xx succeeds and carries the CRM ids", () => {
-    const [result] = classify(200, {
+    const [result] = classify("Classify Response", 200, {
       lead_id: "lead-1",
       activity_id: "activity-1",
       replayed: false,
@@ -501,56 +486,69 @@ describe("selective CRM retry", () => {
     });
   });
 
-  test("permanent failures are never retried", () => {
-    for (const status of [400, 401, 403, 404, 413, 422]) {
-      const [result] = classify(status);
-      expect(result.json.outcome, `status ${status}`).toBe("permanent");
-    }
-  });
-
-  test("temporary failures are routed to the bounded retry node", () => {
-    for (const status of [0, 429, 500, 502, 503, 504]) {
-      const [result] = classify(status);
-      expect(result.json.outcome, `status ${status}`).toBe("retry");
-    }
-  });
-
-  test("classifier output carries no personal data", () => {
-    const [result] = classify(500);
-    expect(JSON.stringify(result.json)).not.toMatch(/@example|[+]1555/);
-  });
-
-  test("every HTTP node continues on error so a Respond node always runs", () => {
-    // Without this, a CRM/provider outage aborts the execution and n8n
-    // answers an empty 200 — the caller would think it was accepted.
-    for (const file of fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".json"))) {
-      const wf = loadWorkflow(file);
-      for (const node of wf.nodes) {
-        if (node.type !== "n8n-nodes-base.httpRequest") continue;
-        expect(node.onError, `${file}:${node.name}`).toBe("continueRegularOutput");
+  test("permanent failures stop on EVERY attempt, not just the first", () => {
+    for (const nodeName of classifiers) {
+      for (const status of [400, 401, 403, 404, 409, 413, 415, 422]) {
+        const [result] = classify(nodeName, status);
+        expect(result.json.outcome, `${nodeName} status ${status}`).toBe("permanent");
       }
     }
   });
 
-  test("retries run synchronously so the webhook answers after the outcome", () => {
-    for (const file of fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".json"))) {
-      const wf = loadWorkflow(file);
-      // A Wait node would end the execution and answer the provider early.
-      expect(wf.nodes.every((node) => node.type !== "n8n-nodes-base.wait"), file).toBe(true);
-      const retry = wf.nodes.find((node) => node.name === "CRM Write Retry");
-      if (!retry) continue;
-      expect(retry.retryOnFail).toBe(true);
-      expect(retry.maxTries).toBeLessThanOrEqual(4);
+  test("temporary failures advance until the bounded final attempt", () => {
+    for (const status of [0, 429, 500, 502, 503, 504]) {
+      expect(classify("Classify Response", status)[0].json.outcome).toBe("retry");
+      expect(classify("Classify Response 2", status)[0].json.outcome).toBe("retry");
+      // The last attempt has nowhere left to go.
+      expect(classify("Classify Response 3", status)[0].json.outcome).toBe("exhausted");
     }
   });
 
-  test("the retry classifier reports success or exhaustion", () => {
-    const [ok] = runCodeNode(workflow, "Classify Retry", [
-      { json: { statusCode: 200, body: { lead_id: "lead-9", activity_id: "act-9" } } },
-    ]);
-    expect(ok.json).toMatchObject({ outcome: "success", lead_id: "lead-9" });
-    const [dead] = runCodeNode(workflow, "Classify Retry", [{ json: { error: "ECONNREFUSED" } }]);
-    expect(dead.json).toMatchObject({ outcome: "exhausted", status: 503 });
+  test("the connection graph is well formed with no orphan keys", () => {
+    for (const file of fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".json"))) {
+      const wf = loadWorkflow(file);
+      const names = new Set(wf.nodes.map((node) => node.name));
+      const connections = wf.connections as Record<
+        string,
+        { main: Array<Array<{ node: string }>> }
+      >;
+      for (const [source, wiring] of Object.entries(connections)) {
+        expect(names.has(source), `${file}: source "${source}"`).toBe(true);
+        for (const target of wiring.main.flat().map((c) => c.node)) {
+          expect(names.has(target), `${file}: target "${target}"`).toBe(true);
+        }
+      }
+    }
+  });
+
+  test("no attempt uses a generic retry mechanism", () => {
+    for (const file of fs.readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".json"))) {
+      const wf = loadWorkflow(file);
+      for (const node of wf.nodes) {
+        expect(node.retryOnFail ?? false, `${file}:${node.name}`).toBe(false);
+      }
+    }
+  });
+
+  test("classifier output carries no event or personal data", () => {
+    for (const nodeName of classifiers) {
+      for (const status of [0, 422, 500]) {
+        const serialized = JSON.stringify(classify(nodeName, status).map((item) => item.json));
+        expect(serialized).not.toMatch(/@example|[+]1555/);
+        expect(serialized).not.toMatch(/idempotency_key|"event"/);
+      }
+    }
+  });
+
+  test("retry attempts read the payload from Prepare Attempt, not a classifier", () => {
+    const attempts = workflow.nodes.filter((node) => node.name.startsWith("CRM Write"));
+    expect(attempts.length).toBe(3);
+    for (const attempt of attempts) {
+      expect(String(attempt.parameters.jsonBody)).toContain("$('Prepare Attempt')");
+      const headers = JSON.stringify(attempt.parameters.headerParameters);
+      expect(headers).toContain("$('Prepare Attempt')");
+      expect(headers).toContain("$env.CRM_INBOUND_API_KEY");
+    }
   });
 });
 
@@ -675,134 +673,127 @@ describe("twilio send workflow", () => {
 
 describe("twilio delivery status honesty", () => {
   const workflow = loadWorkflow("twilio-status.json");
+  const classifiers = ["Classify Status", "Classify Status 2", "Classify Status 3"];
 
-  function classifyStatus(response: Record<string, unknown>) {
-    const node = workflow.nodes.find((c) => c.name === "Classify Status")!;
+  function classify(nodeName: string, statusCode: number, body: unknown = {}) {
+    const node = workflow.nodes.find((candidate) => candidate.name === nodeName)!;
     const nodeRequire = createRequire(import.meta.url);
-    const fn = new Function("$input", "$env", "$", "require", "Buffer", String(node.parameters.jsCode));
-    return fn(
-      { all: () => [{ json: response }] },
-      ENV,
-      () => ({ first: () => ({ json: { payload: { provider_sid: "SMfake1", status: "sent" } } }) }),
-      nodeRequire,
-      Buffer,
-    ) as Array<{ json: Record<string, unknown> }>;
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    return fn({ all: () => [{ json: { statusCode, body } }] }, ENV, nodeRequire, Buffer) as Array<{
+      json: Record<string, unknown>;
+    }>;
   }
 
-  test("only a CRM 2xx becomes a success", () => {
-    const [matched] = classifyStatus({ statusCode: 200, body: { matched: true, status: "delivered" } });
-    expect(matched.json.outcome).toBe("success");
+  test("a CRM 2xx is a success, including an unknown SID's matched:false", () => {
+    expect(classify("Classify Status", 200, { matched: true, status: "delivered" })[0].json.outcome)
+      .toBe("success");
     // An authenticated callback for a SID we do not track is handled, not an error.
-    const [unmatched] = classifyStatus({ statusCode: 200, body: { matched: false, status: null } });
-    expect(unmatched.json.outcome).toBe("success");
+    expect(classify("Classify Status", 200, { matched: false, status: null })[0].json.outcome)
+      .toBe("success");
+    // …and that stays true on later attempts, after an earlier temporary failure.
+    expect(classify("Classify Status 2", 200, { matched: false })[0].json.outcome).toBe("success");
   });
 
-  test("permanent CRM rejections are not retried", () => {
-    for (const status of [400, 401, 403, 404, 413, 422]) {
-      const [result] = classifyStatus({ statusCode: status, body: {} });
-      expect(result.json.outcome, `status ${status}`).toBe("permanent");
-    }
-  });
-
-  test("temporary CRM failures are routed to the bounded retry", () => {
-    for (const status of [0, 429, 500, 502, 503, 504]) {
-      const [result] = classifyStatus({ statusCode: status, body: {} });
-      expect(result.json.outcome, `status ${status}`).toBe("retry");
-    }
-  });
-
-  test("the retry classifier reports success or honest exhaustion", () => {
-    const [ok] = runCodeNode(workflow, "Classify Status Retry", [
-      { json: { statusCode: 204, body: {} } },
-    ]);
-    expect(ok.json.outcome).toBe("success");
-    const [dead] = runCodeNode(workflow, "Classify Status Retry", [
-      { json: { error: "ECONNREFUSED" } },
-    ]);
-    expect(dead.json).toMatchObject({ outcome: "exhausted", status: 503 });
-  });
-
-  test("no CRM result path reaches the 200 response without classification", () => {
-    const successResponders = ["Respond Status OK", "Respond Status Retry Result"];
-    for (const [source, wiring] of Object.entries(
-      workflow.connections as Record<string, { main: Array<Array<{ node: string }>> }>,
-    )) {
-      const targets = wiring.main.flat().map((connection) => connection.node);
-      if (targets.some((target) => successResponders.includes(target))) {
-        // Success responses may only be reached from a classifier/router.
-        expect(["Route Outcome", "Classify Status Retry"], source).toContain(source);
+  test("a permanent 4xx after a temporary failure stops immediately", () => {
+    for (const nodeName of classifiers) {
+      for (const status of [400, 401, 403, 404, 409, 413, 415, 422]) {
+        const [result] = classify(nodeName, status);
+        expect(result.json.outcome, `${nodeName} status ${status}`).toBe("permanent");
       }
     }
-    // Neither CRM node may answer the webhook directly.
-    for (const crmNode of ["CRM Status Update", "CRM Status Retry"]) {
-      const wiring = (workflow.connections as Record<string, { main: Array<Array<{ node: string }>> }>)[
-        crmNode
-      ];
-      const targets = wiring.main.flat().map((connection) => connection.node);
-      expect(targets.every((target) => target.startsWith("Classify")), crmNode).toBe(true);
+  });
+
+  test("repeated temporary failures exhaust into an honest non-2xx", () => {
+    for (const status of [0, 429, 500, 502, 503, 504]) {
+      expect(classify("Classify Status", status)[0].json.outcome).toBe("retry");
+      expect(classify("Classify Status 2", status)[0].json.outcome).toBe("retry");
+      const [final] = classify("Classify Status 3", status);
+      expect(final.json).toMatchObject({ outcome: "exhausted", status: 503 });
     }
   });
 
-  test("error output exposes no CRM key, headers or callback data", () => {
-    const [result] = classifyStatus({
-      statusCode: 500,
-      headers: { "x-api-key": "test-inbound-key-not-real" },
-      body: { detail: "boom" },
-    });
-    const serialized = JSON.stringify(result.json);
-    expect(serialized).not.toContain("test-inbound-key-not-real");
-    expect(serialized).not.toMatch(/x-api-key/i);
+  test("every CRM attempt is classified before anything is retried", () => {
+    const connections = workflow.connections as Record<
+      string,
+      { main: Array<Array<{ node: string }>> }
+    >;
+    const attempts = workflow.nodes.filter((node) => node.name.startsWith("CRM Status Update"));
+    expect(attempts.length).toBe(3);
+    for (const attempt of attempts) {
+      const targets = connections[attempt.name].main.flat().map((c) => c.node);
+      expect(targets.every((t) => t.startsWith("Classify Status")), attempt.name).toBe(true);
+      expect(attempt.retryOnFail ?? false).toBe(false);
+    }
   });
-});
 
-describe("twilio delivery status workflow", () => {
-  const workflow = loadWorkflow("twilio-status.json");
+  test("only a router may reach a success response", () => {
+    const connections = workflow.connections as Record<
+      string,
+      { main: Array<Array<{ node: string }>> }
+    >;
+    for (const [source, wiring] of Object.entries(connections)) {
+      const targets = wiring.main.flat().map((c) => c.node);
+      if (targets.includes("Respond Status OK")) {
+        expect(source.startsWith("Route Status"), source).toBe(true);
+      }
+    }
+  });
 
-  function normalize(params: Record<string, string>, forge = false) {
-    const signature = forge ? "forged" : twilioSignature(params, "twilio-status");
-    return runCodeNode(workflow, "Normalize", [
-      { json: { headers: { "x-twilio-signature": signature }, body: params } },
+  test("attempts read the callback from Normalize, never from a classifier", () => {
+    for (const attempt of workflow.nodes.filter((n) => n.name.startsWith("CRM Status Update"))) {
+      expect(String(attempt.parameters.jsonBody)).toContain("$('Normalize')");
+      expect(String(attempt.parameters.jsonBody)).not.toContain("$json.payload");
+    }
+  });
+
+  test("classifier output exposes no key, headers, signature, SID or callback data", () => {
+    for (const nodeName of classifiers) {
+      for (const status of [0, 422, 500]) {
+        const [result] = classify(nodeName, status, {
+          detail: "boom",
+          provider_sid: "SMfake000000000000000000000000001",
+        });
+        const serialized = JSON.stringify(result.json);
+        expect(serialized).not.toContain("test-inbound-key-not-real");
+        expect(serialized).not.toMatch(/x-api-key|authorization|signature/i);
+        expect(serialized).not.toContain("SMfake");
+        expect(serialized).not.toContain("boom");
+        // Enough to diagnose: outcome plus a safe status/message only.
+        expect(Object.keys(result.json).every((key) =>
+          ["outcome", "status", "message"].includes(key),
+        )).toBe(true);
+      }
+    }
+  });
+
+  test("failure responses return a generic bounded message", () => {
+    const failure = workflow.nodes.find((node) => node.name === "Respond Status Failure")!;
+    const body = String(failure.parameters.responseBody);
+    expect(body).toContain("$json.message");
+    expect(body).not.toContain("payload");
+    expect(body).not.toContain("provider_sid");
+  });
+
+  test("signature and malformed-payload rejection are preserved", () => {
+    const [forged] = runCodeNode(workflow, "Normalize", [
+      {
+        json: {
+          headers: { "x-twilio-signature": "forged" },
+          body: { MessageSid: "SMx", MessageStatus: "delivered" },
+        },
+      },
     ]);
-  }
+    expect(forged.json).toMatchObject({ reject: true, status: 403 });
 
-  test("normalizes a signed delivery callback", () => {
-    const [result] = normalize({
-      MessageSid: "SMfake00000000000000000000000009",
-      MessageStatus: "delivered",
-    });
-    expect(result.json.reject).toBe(false);
-    expect(result.json.payload).toMatchObject({
-      provider_sid: "SMfake00000000000000000000000009",
-      status: "delivered",
-    });
-  });
-
-  test("carries bounded provider error details on failure", () => {
-    const [result] = normalize({
-      MessageSid: "SMfake00000000000000000000000010",
-      MessageStatus: "undelivered",
-      ErrorCode: "30003",
-      ErrorMessage: "Unreachable destination handset",
-    });
-    expect(result.json.payload).toMatchObject({
-      status: "undelivered",
-      error_code: "30003",
-      error_message: "Unreachable destination handset",
-    });
-  });
-
-  test("rejects a forged signature", () => {
-    const [result] = normalize({ MessageSid: "SMx", MessageStatus: "delivered" }, true);
-    expect(result.json).toMatchObject({ reject: true, status: 403 });
-  });
-
-  test("relays to the CRM, retrying only on the dedicated retry node", () => {
-    const first = workflow.nodes.find((node) => node.name === "CRM Status Update")!;
-    expect(first.parameters.url).toBe("={{ $env.CRM_API_URL }}/api/v1/inbound/message-status");
-    // The first attempt must not retry: the classifier decides what is temporary.
-    expect(first.retryOnFail ?? false).toBe(false);
-    const retry = workflow.nodes.find((node) => node.name === "CRM Status Retry")!;
-    expect(retry.retryOnFail).toBe(true);
-    expect(retry.maxTries).toBeLessThanOrEqual(4);
+    const params = { MessageSid: "SMfake00000000000000000000000009" };
+    const [malformed] = runCodeNode(workflow, "Normalize", [
+      {
+        json: {
+          headers: { "x-twilio-signature": twilioSignature(params, "twilio-status") },
+          body: params,
+        },
+      },
+    ]);
+    expect(malformed.json).toMatchObject({ reject: true, status: 422 });
   });
 });

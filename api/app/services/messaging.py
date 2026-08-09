@@ -58,6 +58,13 @@ def get_settings_row(db: Session) -> CommunicationSettings:
     return row
 
 
+def lock_lead(db: Session, lead_id: uuid.UUID) -> None:
+    """Take a row lock on the lead, serializing everything that follows for
+    that lead until the caller commits. SQLite ignores FOR UPDATE; the
+    PostgreSQL behaviour is covered by the concurrency tests."""
+    db.execute(select(Lead.id).where(Lead.id == lead_id).with_for_update())
+
+
 # A pending outbound row older than this was almost certainly abandoned by a
 # crash between the durable insert and recording the provider outcome.
 PENDING_RECOVERY_MINUTES = 10
@@ -72,6 +79,11 @@ def recover_abandoned_pending(db: Session, lead_id: uuid.UUID | None = None) -> 
     lead's pending-send guard forever.
     """
     cutoff = utcnow() - timedelta(minutes=PENDING_RECOVERY_MINUTES)
+    if lead_id is not None:
+        # Serialize with any concurrent send/recovery for this lead so two
+        # callers cannot both transition the same row and write duplicate
+        # explanatory activities.
+        lock_lead(db, lead_id)
     query = select(OutboundMessage).where(
         OutboundMessage.status == "pending", OutboundMessage.created_at < cutoff
     )
@@ -261,6 +273,7 @@ def create_and_send(
     sender,
     acting_user: User | None = None,
     related_activity_id: uuid.UUID | None = None,
+    serialize_on_lead: bool = False,
 ) -> OutboundMessage:
     """Persist the outbound record, commit it, then contact the provider.
 
@@ -274,6 +287,31 @@ def create_and_send(
     )
     if existing is not None:
         return existing
+
+    if serialize_on_lead:
+        # Hold the lead lock across the pending check and the durable insert
+        # so a concurrent request with a different key cannot slip past the
+        # guard. The lock is released by the commit below, well before the
+        # provider is contacted.
+        lock_lead(db, lead.id)
+        # Re-check the key under the lock: a concurrent request with the SAME
+        # key may have committed its record while we waited, and that must
+        # still be idempotent rather than a conflict.
+        existing = db.scalar(
+            select(OutboundMessage).where(OutboundMessage.idempotency_key_digest == digest)
+        )
+        if existing is not None:
+            db.commit()
+            return existing
+        recover_abandoned_pending(db, lead.id)
+        pending = db.scalar(
+            select(OutboundMessage).where(
+                OutboundMessage.lead_id == lead.id, OutboundMessage.status == "pending"
+            )
+        )
+        if pending is not None:
+            db.commit()
+            raise MessagingError("A message is already being sent for this lead.", status_code=409)
 
     message = OutboundMessage(
         lead_id=lead.id,
@@ -398,18 +436,8 @@ def send_lead_sms(
     if not lead.phone or not lead.phone.startswith("+"):
         raise MessagingError("This lead has no phone number in international format.")
 
-    # Clear anything abandoned by a crash first, so one interrupted send does
-    # not block this lead's messaging forever.
-    if recover_abandoned_pending(db, lead.id):
-        db.commit()
-    pending = db.scalar(
-        select(OutboundMessage).where(
-            OutboundMessage.lead_id == lead.id, OutboundMessage.status == "pending"
-        )
-    )
-    if pending is not None:
-        raise MessagingError("A message is already being sent for this lead.", status_code=409)
-
+    # Recovery, the pending check and the durable insert all happen under a
+    # per-lead row lock inside create_and_send.
     return create_and_send(
         db,
         lead,
@@ -420,6 +448,7 @@ def send_lead_sms(
         settings=settings,
         sender=sender,
         acting_user=acting_user,
+        serialize_on_lead=True,
     )
 
 

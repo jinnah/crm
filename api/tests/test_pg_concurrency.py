@@ -239,3 +239,257 @@ def test_concurrent_settings_creation_yields_one_row(pg_session_factory) -> None
     first = get_settings_row(check).id
     assert get_settings_row(check).id == first
     check.close()
+
+
+class _CountingSender:
+    """Records every provider contact; deliberately slow so concurrent
+    requests overlap the window between reservation and outcome."""
+
+    def __init__(self, delay=0.4):
+        self.delay = delay
+        self.sent = []
+        self._lock = threading.Lock()
+
+    def send(self, message):
+        import time as _time
+
+        from app.services.messaging import SendOutcome
+
+        with self._lock:
+            self.sent.append(str(message.id))
+            index = len(self.sent)
+        _time.sleep(self.delay)
+        return SendOutcome(status="submitted", provider_sid=f"SMconc{index:026d}")
+
+
+def _seed_lead(session, phone="+15550990001"):
+    from app.models import Lead
+
+    lead = Lead(name="Concurrent Lead", phone=phone, source="manual")
+    session.add(lead)
+    session.commit()
+    return lead
+
+
+def test_concurrent_same_key_contacts_provider_once(pg_session_factory) -> None:
+    from sqlalchemy import func
+
+    from app.config import get_settings
+    from app.models import OutboundMessage
+    from app.services.messaging import send_lead_sms
+
+    setup = pg_session_factory()
+    owner = make_owner(setup, "owner@example.com")
+    lead = _seed_lead(setup)
+    setup.close()
+
+    sender = _CountingSender()
+    settings = get_settings()
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    errors: list[Exception] = []
+
+    def send() -> None:
+        session = pg_session_factory()
+        try:
+            acting = session.get(User, owner.id)
+            target = session.get(Lead, lead.id)
+            barrier.wait(timeout=5)
+            message = send_lead_sms(
+                session, acting, target, "same key", "conc-same-key", settings, sender
+            )
+            outcomes.append(str(message.id))
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    from app.models import Lead
+
+    threads = [threading.Thread(target=send) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert len(set(outcomes)) == 1, "same key must return the same record"
+    assert len(sender.sent) == 1, "the provider must be contacted exactly once"
+
+    check = pg_session_factory()
+    assert check.scalar(func.count(OutboundMessage.id)) == 1
+    check.close()
+
+
+def test_concurrent_different_keys_yield_one_send_and_a_conflict(pg_session_factory) -> None:
+    """A second request with a different key must see the durable pending row
+    and be refused without contacting the provider."""
+    from sqlalchemy import func
+
+    from app.config import get_settings
+    from app.models import Lead, OutboundMessage
+    from app.services.messaging import MessagingError, send_lead_sms
+
+    setup = pg_session_factory()
+    owner = make_owner(setup, "owner@example.com")
+    lead = _seed_lead(setup, "+15550990002")
+    setup.close()
+
+    sender = _CountingSender(delay=1.5)
+    settings = get_settings()
+    barrier = threading.Barrier(2)
+    conflicts: list[int] = []
+    sent_ok: list[str] = []
+    errors: list[Exception] = []
+
+    def send(key: str) -> None:
+        session = pg_session_factory()
+        try:
+            acting = session.get(User, owner.id)
+            target = session.get(Lead, lead.id)
+            barrier.wait(timeout=5)
+            message = send_lead_sms(session, acting, target, f"body {key}", key, settings, sender)
+            sent_ok.append(str(message.id))
+        except MessagingError as error:
+            conflicts.append(error.status_code)
+            session.rollback()
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [
+        threading.Thread(target=send, args=("conc-key-a",)),
+        threading.Thread(target=send, args=("conc-key-b",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert conflicts == [409], f"expected exactly one 409, got {conflicts}"
+    assert len(sent_ok) == 1
+    assert len(sender.sent) == 1, "the provider must be contacted exactly once"
+
+    check = pg_session_factory()
+    assert check.scalar(func.count(OutboundMessage.id)) == 1
+    check.close()
+
+
+def test_concurrent_recovery_records_one_transition(pg_session_factory) -> None:
+    """Two simultaneous recoveries of one abandoned pending message must
+    produce a single transition and at most one explanatory activity."""
+    from datetime import timedelta
+
+    from sqlalchemy import func
+    from sqlalchemy import select as sa_select
+
+    from app.models import LeadActivity, OutboundMessage, utcnow
+    from app.services.messaging import PENDING_RECOVERY_MINUTES, recover_abandoned_pending
+
+    setup = pg_session_factory()
+    lead = _seed_lead(setup, "+15550990003")
+    stranded = OutboundMessage(
+        lead_id=lead.id,
+        purpose="human_reply",
+        to_phone="+15550990003",
+        body="abandoned by a crash",
+        status="pending",
+        idempotency_key_digest="digest-abandoned-conc",
+        created_at=utcnow() - timedelta(minutes=PENDING_RECOVERY_MINUTES + 5),
+    )
+    setup.add(stranded)
+    setup.commit()
+    setup.close()
+
+    barrier = threading.Barrier(2)
+    recovered_counts: list[int] = []
+    errors: list[Exception] = []
+
+    def recover() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            count = recover_abandoned_pending(session, lead.id)
+            session.commit()
+            recovered_counts.append(count)
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=recover) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert sum(recovered_counts) == 1, f"exactly one transition expected, got {recovered_counts}"
+
+    check = pg_session_factory()
+    row = check.scalar(
+        sa_select(OutboundMessage).where(
+            OutboundMessage.idempotency_key_digest == "digest-abandoned-conc"
+        )
+    )
+    assert row.status == "unknown"  # never "failed"
+    activities = check.scalars(
+        sa_select(LeadActivity).where(LeadActivity.type == "message_status")
+    ).all()
+    assert len(activities) <= 1
+    # Recovery never resends: no new outbound row appeared.
+    assert check.scalar(func.count(OutboundMessage.id)) == 1
+    check.close()
+
+
+def test_recovered_message_is_not_resent_automatically(pg_session_factory) -> None:
+    from datetime import timedelta
+
+    from app.config import get_settings
+    from app.models import Lead, OutboundMessage, utcnow
+    from app.services.messaging import PENDING_RECOVERY_MINUTES, send_lead_sms
+
+    setup = pg_session_factory()
+    owner = make_owner(setup, "owner@example.com")
+    lead = _seed_lead(setup, "+15550990004")
+    setup.add(
+        OutboundMessage(
+            lead_id=lead.id,
+            purpose="human_reply",
+            to_phone="+15550990004",
+            body="interrupted original",
+            status="pending",
+            idempotency_key_digest="digest-not-resent",
+            created_at=utcnow() - timedelta(minutes=PENDING_RECOVERY_MINUTES + 5),
+        )
+    )
+    setup.commit()
+    setup.close()
+
+    sender = _CountingSender(delay=0)
+    session = pg_session_factory()
+    acting = session.get(User, owner.id)
+    target = session.get(Lead, lead.id)
+    # A fresh, deliberate send unblocks the lead but must not resend the old body.
+    send_lead_sms(
+        session, acting, target, "a new deliberate message", "fresh-key", get_settings(), sender
+    )
+    session.close()
+
+    assert len(sender.sent) == 1
+    check = pg_session_factory()
+    from sqlalchemy import select as sa_select
+
+    stranded = check.scalar(
+        sa_select(OutboundMessage).where(
+            OutboundMessage.idempotency_key_digest == "digest-not-resent"
+        )
+    )
+    assert stranded.status == "unknown"
+    assert stranded.error_code == "abandoned"
+    check.close()
