@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Briefcase,
   CalendarDays,
   LayoutDashboard,
   ListChecks,
@@ -26,6 +27,7 @@ type NavEntry = { href: string; label: string; icon: ReactNode; exact?: boolean 
 const WORKSPACE_NAV: NavEntry[] = [
   { href: "/", label: "Today", icon: <LayoutDashboard size={ICON_SIZE} />, exact: true },
   { href: "/leads", label: "Leads", icon: <Users size={ICON_SIZE} /> },
+  { href: "/jobs", label: "Jobs", icon: <Briefcase size={ICON_SIZE} /> },
   { href: "/calendar", label: "Calendar", icon: <CalendarDays size={ICON_SIZE} /> },
 ];
 

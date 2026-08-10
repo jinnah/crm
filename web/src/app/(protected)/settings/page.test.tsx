@@ -121,6 +121,7 @@ test("owner lands on Business & branding with the section navigation", async () 
     "Availability",
     "Appointment notifications",
     "Voice calls",
+    "Documents & email",
   ]);
   // The branding manager is on the first section.
   expect(await screen.findByText(/Drag an image here/)).toBeInTheDocument();

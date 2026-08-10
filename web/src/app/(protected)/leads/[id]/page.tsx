@@ -3,6 +3,7 @@
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { AppointmentsPanel } from "@/components/appointments-panel";
+import { JobsPanel } from "@/components/jobs-panel";
 import { useAuth } from "@/components/auth-context";
 import { CustomFieldInputs } from "@/components/custom-field-inputs";
 import { LeadBadges, sourceLabel, statusLabel } from "@/components/lead-badges";
@@ -244,6 +245,11 @@ export default function LeadDetailPage() {
             csrfToken={csrfToken}
             canSend={canManage || lead.assigned_to === user.id}
             onChanged={reload}
+          />
+          <JobsPanel
+            lead={lead}
+            csrfToken={csrfToken}
+            canCreate={canManage || lead.assigned_to === user.id}
           />
           <AppointmentsPanel
             lead={lead}

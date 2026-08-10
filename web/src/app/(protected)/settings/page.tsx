@@ -19,6 +19,8 @@ import {
   WEEKDAY_LABELS,
   type AssignableUser,
   type CommunicationSettings,
+  type DocumentConfigHealth,
+  type DocumentSettings,
   type SchedulingSettings,
   type VoiceSettings,
 } from "@/lib/api";
@@ -35,7 +37,8 @@ type SectionKey =
   | "scheduling"
   | "availability"
   | "notifications"
-  | "voice";
+  | "voice"
+  | "documents";
 
 const SECTIONS: ReadonlyArray<{ key: SectionKey; label: string }> = [
   { key: "business", label: "Business & branding" },
@@ -46,6 +49,7 @@ const SECTIONS: ReadonlyArray<{ key: SectionKey; label: string }> = [
   { key: "availability", label: "Availability" },
   { key: "notifications", label: "Appointment notifications" },
   { key: "voice", label: "Voice calls" },
+  { key: "documents", label: "Documents & email" },
 ];
 
 /** Which fields each section owns, for dirty tracking and saving. */
@@ -97,6 +101,42 @@ const VOICE_FIELDS: Array<keyof VoiceSettings> = [
   "voice_transcript_retention_days",
 ];
 
+const DOC_FIELDS: Array<keyof DocumentSettings> = [
+  "default_currency",
+  "quote_number_prefix",
+  "invoice_number_prefix",
+  "receipt_number_prefix",
+  "default_quote_valid_days",
+  "default_invoice_due_days",
+  "default_tax_rate_bp",
+  "business_email",
+  "business_phone",
+  "business_address",
+  "business_registration_id",
+  "email_from_display_name",
+  "email_reply_to",
+  "quote_email_subject",
+  "quote_email_body",
+  "invoice_email_subject",
+  "invoice_email_body",
+  "receipt_email_subject",
+  "receipt_email_body",
+  "secure_link_expiry_days",
+  "email_attach_pdf_default",
+];
+
+const EMAIL_VARIABLES = [
+  "customer_name",
+  "business_name",
+  "job_number",
+  "document_type",
+  "document_number",
+  "document_total",
+  "due_date",
+  "secure_document_link",
+  "reply_to",
+];
+
 const MESSAGE_VARIABLES = ["lead_name", "business_name", "source", "lead_id"];
 const VOICE_VARIABLES = [
   "lead_name",
@@ -129,9 +169,12 @@ export default function SettingsPage() {
   const [savedComm, setSavedComm] = useState<CommunicationSettings | null>(null);
   const [savedSched, setSavedSched] = useState<SchedulingSettings | null>(null);
   const [savedVoice, setSavedVoice] = useState<VoiceSettings | null>(null);
+  const [savedDocs, setSavedDocs] = useState<DocumentSettings | null>(null);
   const [comm, setComm] = useState<CommunicationSettings | null>(null);
   const [sched, setSched] = useState<SchedulingSettings | null>(null);
   const [voice, setVoice] = useState<VoiceSettings | null>(null);
+  const [docs, setDocs] = useState<DocumentSettings | null>(null);
+  const [configHealth, setConfigHealth] = useState<DocumentConfigHealth | null>(null);
   const [staff, setStaff] = useState<AssignableUser[]>([]);
   const [section, setSection] = useState<SectionKey>("business");
   const [error, setError] = useState<string | null>(null);
@@ -167,6 +210,16 @@ export default function SettingsPage() {
     void api<AssignableUser[]>("/leads/assignable-users").then((result) => {
       if (!cancelled && result.ok && result.data !== null) setStaff(result.data);
     });
+    void api<DocumentSettings>("/settings/documents").then((result) => {
+      if (cancelled) return;
+      if (result.ok && result.data !== null) {
+        setSavedDocs(result.data);
+        setDocs(result.data);
+      }
+    });
+    void api<DocumentConfigHealth>("/settings/documents/health").then((result) => {
+      if (!cancelled && result.ok && result.data !== null) setConfigHealth(result.data);
+    });
     return () => {
       cancelled = true;
     };
@@ -198,8 +251,15 @@ export default function SettingsPage() {
     ) {
       dirty.add("voice");
     }
+    if (
+      savedDocs !== null &&
+      docs !== null &&
+      DOC_FIELDS.some((field) => !same(docs[field], savedDocs[field]))
+    ) {
+      dirty.add("documents");
+    }
     return dirty;
-  }, [comm, savedComm, sched, savedSched, voice, savedVoice]);
+  }, [comm, savedComm, sched, savedSched, voice, savedVoice, docs, savedDocs]);
 
   // Leaving the page with unsaved edits gets a browser warning.
   useEffect(() => {
@@ -240,6 +300,7 @@ export default function SettingsPage() {
       setComm(savedComm);
       setSched(savedSched);
       setVoice(savedVoice);
+      setDocs(savedDocs);
     }
     setError(null);
     setNotice(null);
@@ -304,6 +365,20 @@ export default function SettingsPage() {
         setSavedVoice(result.data);
         setVoice(result.data);
       }
+      if (key === "documents" && docs !== null) {
+        const body = Object.fromEntries(DOC_FIELDS.map((field) => [field, docs[field]]));
+        const result = await api<DocumentSettings>("/settings/documents", {
+          method: "PATCH",
+          csrfToken,
+          body,
+        });
+        if (!result.ok || result.data === null) {
+          setError(errorDetail(result.data, "Unable to save these settings."));
+          return;
+        }
+        setSavedDocs(result.data);
+        setDocs(result.data);
+      }
       setNotice(`${sectionLabel} saved.`);
     } finally {
       setSaving(false);
@@ -323,8 +398,12 @@ export default function SettingsPage() {
   const updateVoice = <K extends keyof VoiceSettings>(key: K, value: VoiceSettings[K]) =>
     setVoice((current) => (current === null ? current : { ...current, [key]: value }));
 
+  const updateDocs = <K extends keyof DocumentSettings>(key: K, value: DocumentSettings[K]) =>
+    setDocs((current) => (current === null ? current : { ...current, [key]: value }));
+
   const schedReady = sched !== null && savedSched !== null;
   const voiceReady = voice !== null && savedVoice !== null;
+  const docsReady = docs !== null && savedDocs !== null;
   const currentLabel = SECTIONS.find((entry) => entry.key === section)?.label ?? "Settings";
 
   return (
@@ -878,6 +957,300 @@ export default function SettingsPage() {
         {section === "voice" && !voiceReady && (
           <p className="page-status" role="status">
             Loading voice settings…
+          </p>
+        )}
+
+        {section === "documents" && docsReady && (
+          <>
+            <Card
+              title="Business document details"
+              description="What appears on generated quotes, invoices and receipts."
+            >
+              <div className="form-field">
+                <label htmlFor="docs-currency">Default currency (ISO code)</label>
+                <input
+                  id="docs-currency"
+                  maxLength={3}
+                  style={{ maxWidth: "6rem", textTransform: "uppercase" }}
+                  value={docs.default_currency}
+                  onChange={(event) =>
+                    updateDocs("default_currency", event.target.value.toUpperCase())
+                  }
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-email">Business email</label>
+                <input
+                  id="docs-email"
+                  maxLength={320}
+                  value={docs.business_email}
+                  onChange={(event) => updateDocs("business_email", event.target.value)}
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-phone">Business phone</label>
+                <input
+                  id="docs-phone"
+                  maxLength={32}
+                  value={docs.business_phone}
+                  onChange={(event) => updateDocs("business_phone", event.target.value)}
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-address">Business address</label>
+                <textarea
+                  id="docs-address"
+                  rows={2}
+                  maxLength={500}
+                  value={docs.business_address}
+                  onChange={(event) => updateDocs("business_address", event.target.value)}
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-registration">
+                  Registration / tax identifier (optional)
+                </label>
+                <input
+                  id="docs-registration"
+                  maxLength={100}
+                  value={docs.business_registration_id}
+                  onChange={(event) =>
+                    updateDocs("business_registration_id", event.target.value)
+                  }
+                />
+                <p className="form-help">
+                  Printed on documents when set. The CRM does not calculate or certify
+                  jurisdiction-specific tax obligations.
+                </p>
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-quote-prefix">Quote number prefix</label>
+                <input
+                  id="docs-quote-prefix"
+                  maxLength={8}
+                  style={{ maxWidth: "8rem" }}
+                  value={docs.quote_number_prefix}
+                  onChange={(event) => updateDocs("quote_number_prefix", event.target.value)}
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-invoice-prefix">Invoice number prefix</label>
+                <input
+                  id="docs-invoice-prefix"
+                  maxLength={8}
+                  style={{ maxWidth: "8rem" }}
+                  value={docs.invoice_number_prefix}
+                  onChange={(event) => updateDocs("invoice_number_prefix", event.target.value)}
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-receipt-prefix">Receipt number prefix</label>
+                <input
+                  id="docs-receipt-prefix"
+                  maxLength={8}
+                  style={{ maxWidth: "8rem" }}
+                  value={docs.receipt_number_prefix}
+                  onChange={(event) => updateDocs("receipt_number_prefix", event.target.value)}
+                />
+                <p className="form-help">
+                  Prefixes apply to newly issued numbers only; issued numbers never change.
+                </p>
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-valid-days">Quote validity (days)</label>
+                <input
+                  id="docs-valid-days"
+                  type="number"
+                  min={1}
+                  max={365}
+                  style={{ maxWidth: "8rem" }}
+                  value={docs.default_quote_valid_days}
+                  onChange={(event) =>
+                    updateDocs("default_quote_valid_days", Number(event.target.value) || 1)
+                  }
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-due-days">Invoice due period (days)</label>
+                <input
+                  id="docs-due-days"
+                  type="number"
+                  min={1}
+                  max={365}
+                  style={{ maxWidth: "8rem" }}
+                  value={docs.default_invoice_due_days}
+                  onChange={(event) =>
+                    updateDocs("default_invoice_due_days", Number(event.target.value) || 1)
+                  }
+                />
+              </div>
+              <SaveBar
+                dirty={dirtySections.has("documents")}
+                saving={saving}
+                label="Save document settings"
+                onSave={() => void saveSection("documents", currentLabel)}
+              />
+            </Card>
+
+            <Card
+              title="Document email"
+              description="How quotes, invoices and receipts travel to customers."
+            >
+              <div className="form-field">
+                <label htmlFor="docs-from-address">Verified sender address</label>
+                <input
+                  id="docs-from-address"
+                  value={docs.effective_from_address || "Not configured"}
+                  readOnly
+                  aria-describedby="docs-from-help"
+                />
+                <p id="docs-from-help" className="form-help">
+                  Deployment configuration (DOCUMENT_EMAIL_FROM_ADDRESS), shown read-only.
+                  {docs.sender_configured
+                    ? " Sending is enabled."
+                    : " Sending is disabled until an address is configured and verified — drafts and PDFs still work."}
+                </p>
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-from-name">From display name</label>
+                <input
+                  id="docs-from-name"
+                  maxLength={200}
+                  placeholder={comm.business_name}
+                  value={docs.email_from_display_name}
+                  onChange={(event) =>
+                    updateDocs("email_from_display_name", event.target.value)
+                  }
+                />
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-reply-to">Reply-To address</label>
+                <input
+                  id="docs-reply-to"
+                  maxLength={320}
+                  value={docs.email_reply_to}
+                  onChange={(event) => updateDocs("email_reply_to", event.target.value)}
+                />
+                <p className="form-help">The monitored address customer replies land in.</p>
+              </div>
+              <div className="form-field form-field-checkbox">
+                <label htmlFor="docs-attach-default">
+                  <input
+                    id="docs-attach-default"
+                    type="checkbox"
+                    checked={docs.email_attach_pdf_default}
+                    onChange={(event) =>
+                      updateDocs("email_attach_pdf_default", event.target.checked)
+                    }
+                  />{" "}
+                  Attach the PDF by default (a secure link is always included)
+                </label>
+              </div>
+              <div className="form-field">
+                <label htmlFor="docs-link-expiry">Secure link expiry (days)</label>
+                <input
+                  id="docs-link-expiry"
+                  type="number"
+                  min={1}
+                  max={365}
+                  style={{ maxWidth: "8rem" }}
+                  value={docs.secure_link_expiry_days}
+                  onChange={(event) =>
+                    updateDocs("secure_link_expiry_days", Number(event.target.value) || 1)
+                  }
+                />
+              </div>
+              <TemplateField
+                id="docs-quote-subject"
+                label="Quote email subject"
+                value={docs.quote_email_subject}
+                onChange={(value) => updateDocs("quote_email_subject", value)}
+                variables={EMAIL_VARIABLES}
+              />
+              <TemplateField
+                id="docs-quote-body"
+                label="Quote email body"
+                value={docs.quote_email_body}
+                onChange={(value) => updateDocs("quote_email_body", value)}
+                variables={EMAIL_VARIABLES}
+              />
+              <TemplateField
+                id="docs-invoice-subject"
+                label="Invoice email subject"
+                value={docs.invoice_email_subject}
+                onChange={(value) => updateDocs("invoice_email_subject", value)}
+                variables={EMAIL_VARIABLES}
+              />
+              <TemplateField
+                id="docs-invoice-body"
+                label="Invoice email body"
+                value={docs.invoice_email_body}
+                onChange={(value) => updateDocs("invoice_email_body", value)}
+                variables={EMAIL_VARIABLES}
+              />
+              <TemplateField
+                id="docs-receipt-subject"
+                label="Receipt email subject"
+                value={docs.receipt_email_subject}
+                onChange={(value) => updateDocs("receipt_email_subject", value)}
+                variables={EMAIL_VARIABLES}
+              />
+              <TemplateField
+                id="docs-receipt-body"
+                label="Receipt email body"
+                value={docs.receipt_email_body}
+                onChange={(value) => updateDocs("receipt_email_body", value)}
+                variables={EMAIL_VARIABLES}
+              />
+              <SaveBar
+                dirty={dirtySections.has("documents")}
+                saving={saving}
+                label="Save document email settings"
+                onSave={() => void saveSection("documents", currentLabel)}
+              />
+            </Card>
+
+            {configHealth !== null && (
+              <Card
+                title="Configuration health"
+                description="Storage, scanning and sender state — no secrets are shown."
+              >
+                <ul className="document-list">
+                  <li className="document-row">
+                    <span className="document-title">
+                      <span style={{ fontWeight: 600 }}>Document storage</span>
+                      <span className="cell-secondary">
+                        {configHealth.storage.backend} — {configHealth.storage.status}
+                      </span>
+                    </span>
+                  </li>
+                  <li className="document-row">
+                    <span className="document-title">
+                      <span style={{ fontWeight: 600 }}>Malware scanner</span>
+                      <span className="cell-secondary">
+                        {configHealth.scanner.backend} — {configHealth.scanner.status}
+                      </span>
+                    </span>
+                  </li>
+                  <li className="document-row">
+                    <span className="document-title">
+                      <span style={{ fontWeight: 600 }}>Email sender</span>
+                      <span className="cell-secondary">
+                        {configHealth.sender_configured
+                          ? "configured and verified in deployment settings"
+                          : "not configured — sending disabled"}
+                      </span>
+                    </span>
+                  </li>
+                </ul>
+              </Card>
+            )}
+          </>
+        )}
+
+        {section === "documents" && !docsReady && (
+          <p className="page-status" role="status">
+            Loading document settings…
           </p>
         )}
           </div>

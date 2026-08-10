@@ -367,3 +367,218 @@ export function errorDetail(data: unknown, fallback: string): string {
   }
   return fallback;
 }
+
+// --- Jobs, documents, commercial records and document email --------------
+
+export const JOB_STATUSES = [
+  "new",
+  "quoted",
+  "approved",
+  "scheduled",
+  "in_progress",
+  "completed",
+  "canceled",
+] as const;
+
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
+export const JOB_STATUS_LABELS: Record<JobStatus, string> = {
+  new: "New",
+  quoted: "Quoted",
+  approved: "Approved",
+  scheduled: "Scheduled",
+  in_progress: "In progress",
+  completed: "Completed",
+  canceled: "Canceled",
+};
+
+export type Job = {
+  id: string;
+  job_number: string;
+  lead_id: string;
+  lead_name: string | null;
+  title: string;
+  service_type: string;
+  service_address: string;
+  status: JobStatus;
+  assigned_to: string | null;
+  assignee_name: string | null;
+  scheduled_for: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  internal_notes: string;
+  archived_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JobList = {
+  items: Job[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export const DOCUMENT_CATEGORIES = [
+  "receipt",
+  "quote",
+  "invoice",
+  "contract",
+  "permit",
+  "warranty",
+  "photo",
+  "other",
+] as const;
+
+export type JobDocument = {
+  id: string;
+  job_id: string;
+  title: string;
+  category: string;
+  description: string;
+  original_filename: string;
+  content_type: string;
+  byte_size: number;
+  sha256: string;
+  scan_state: "pending" | "clean" | "infected" | "failed";
+  scan_detail: string | null;
+  has_preview: boolean;
+  archived_at: string | null;
+  deleted_at: string | null;
+  created_at: string;
+};
+
+export type LineItem = {
+  position?: number;
+  description: string;
+  quantity_milli: number;
+  unit: string;
+  unit_price_minor: number;
+  discount_bp: number;
+  tax_rate_bp: number;
+  line_total_minor?: number;
+};
+
+export type CommercialDocument = {
+  id: string;
+  kind: "quote" | "invoice" | "receipt";
+  job_id: string;
+  status: string;
+  number: string | null;
+  currency: string;
+  discount_bp: number;
+  subtotal_minor: number;
+  discount_total_minor: number;
+  tax_total_minor: number;
+  total_minor: number;
+  amount_paid_minor: number;
+  customer_notes: string;
+  terms: string;
+  valid_until: string | null;
+  issued_at: string | null;
+  due_at: string | null;
+  current_version: number;
+  responded_at: string | null;
+  response_name: string | null;
+  source_quote_id: string | null;
+  converted_invoice_id: string | null;
+  payment_id: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+  created_at: string;
+  lines: LineItem[];
+};
+
+export type Payment = {
+  id: string;
+  invoice_id: string;
+  amount_minor: number;
+  currency: string;
+  method: string;
+  paid_on: string;
+  reference: string;
+  internal_note: string;
+  receipt_document_id: string | null;
+  voided_at: string | null;
+  void_reason: string | null;
+  created_at: string;
+};
+
+export type EmailDeliveryRecord = {
+  id: string;
+  job_id: string;
+  purpose: string;
+  version_id: string | null;
+  recipient: string;
+  from_name: string;
+  from_address: string;
+  reply_to: string;
+  subject: string;
+  attach_pdf: boolean;
+  status: string;
+  attempts: number;
+  provider_message_id: string | null;
+  failure_class: string | null;
+  failure_message: string | null;
+  created_at: string;
+  submitted_at: string | null;
+  delivered_at: string | null;
+};
+
+export type DocumentSettings = {
+  default_currency: string;
+  quote_number_prefix: string;
+  invoice_number_prefix: string;
+  receipt_number_prefix: string;
+  default_quote_valid_days: number;
+  default_invoice_due_days: number;
+  default_tax_rate_bp: number;
+  business_email: string;
+  business_phone: string;
+  business_address: string;
+  business_registration_id: string;
+  email_from_display_name: string;
+  email_reply_to: string;
+  quote_email_subject: string;
+  quote_email_body: string;
+  invoice_email_subject: string;
+  invoice_email_body: string;
+  receipt_email_subject: string;
+  receipt_email_body: string;
+  secure_link_expiry_days: number;
+  email_attach_pdf_default: boolean;
+  effective_from_address: string;
+  sender_configured: boolean;
+};
+
+export type DocumentConfigHealth = {
+  storage: Record<string, string>;
+  scanner: Record<string, string>;
+  sender_configured: boolean;
+};
+
+/** Money helper: integer minor units → "199.99 USD". Display only — the
+ * server owns every authoritative calculation. */
+export function formatMinor(amountMinor: number, currency: string): string {
+  const sign = amountMinor < 0 ? "-" : "";
+  const value = Math.abs(amountMinor);
+  const major = Math.floor(value / 100);
+  const minor = value % 100;
+  return `${sign}${major.toLocaleString()}.${String(minor).padStart(2, "0")} ${currency}`;
+}
+
+export function formatQuantity(quantityMilli: number): string {
+  return String(quantityMilli / 1000);
+}
+
+/** UI mirror of the server's central lifecycle map — display only; the
+ * server enforces every transition. */
+export const JOB_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
+  new: ["quoted", "approved", "scheduled", "in_progress", "canceled"],
+  quoted: ["approved", "scheduled", "in_progress", "canceled"],
+  approved: ["scheduled", "in_progress", "completed", "canceled"],
+  scheduled: ["in_progress", "completed", "canceled"],
+  in_progress: ["completed", "canceled"],
+  completed: [],
+  canceled: [],
+};
