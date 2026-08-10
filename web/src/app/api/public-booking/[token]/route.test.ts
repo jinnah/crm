@@ -7,6 +7,7 @@ const TOKEN = "AbCdEf0123456789_-xyzTOKENvalue";
 
 beforeEach(() => {
   process.env.CRM_API_URL = "http://api:8000";
+  process.env.INTERNAL_BFF_KEY = "internal-test-key";
 });
 
 afterEach(() => {
@@ -48,7 +49,13 @@ test("fetches the booking page through the server, never from the browser", asyn
   const fetchMock = stubForward(200, { business_name: "Acme", days: [] });
   const response = await GET(new Request("http://localhost:3000/x"), context());
   expect(response.status).toBe(200);
-  expect(fetchMock.mock.calls[0][0]).toBe(`http://api:8000/api/v1/public/book/${TOKEN}`);
+  // Fixed internal path: the capability travels in the body, never the URL.
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(url).toBe("http://api:8000/api/v1/internal/booking/info");
+  expect(String(url)).not.toContain(TOKEN);
+  expect(init?.method).toBe("POST");
+  expect(new Headers(init?.headers).get("X-Internal-Key")).toBe("internal-test-key");
+  expect(JSON.parse(String(init?.body))).toMatchObject({ token: TOKEN });
   // Nothing is cached, so a revoked link cannot be served from a stale copy.
   expect(response.headers.get("Cache-Control")).toBe("no-store");
 });
@@ -75,9 +82,12 @@ test("forwards only the time, the booking key and the honeypot", async () => {
     context(),
   );
   expect(response.status).toBe(200);
-  const forwarded = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
-  expect(Object.keys(forwarded).sort()).toEqual(["booking_key", "start_at", "website"]);
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(url).toBe("http://api:8000/api/v1/internal/booking/confirm");
+  const forwarded = JSON.parse(String(init?.body));
+  expect(Object.keys(forwarded).sort()).toEqual(["booking_key", "start_at", "token", "website"]);
   expect(forwarded.start_at).toBe(VALID.start_at);
+  expect(forwarded.token).toBe(TOKEN);
 });
 
 test("passes the CRM's refusal straight through", async () => {

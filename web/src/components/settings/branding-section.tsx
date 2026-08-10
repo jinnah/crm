@@ -9,6 +9,7 @@ import {
   InlineError,
   InlineSuccess,
 } from "@/components/ui";
+import { notifyBrandingChanged } from "@/components/brand-mark";
 import { api, errorDetail } from "@/lib/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -107,6 +108,7 @@ export function BrandingSection({ csrfToken }: { csrfToken: string }) {
       if (pendingUrl !== null) URL.revokeObjectURL(pendingUrl);
       setPendingUrl(null);
       setVersion((value) => value + 1);
+      notifyBrandingChanged();
       setNotice("Logo saved. It now appears across the CRM and the customer pages.");
     } catch {
       setError("The logo could not be saved. Check your connection and try again.");
@@ -131,6 +133,7 @@ export function BrandingSection({ csrfToken }: { csrfToken: string }) {
     }
     setBranding(result.data);
     setVersion((value) => value + 1);
+    notifyBrandingChanged();
     setNotice("Logo removed. The wordmark is shown instead.");
   }
 

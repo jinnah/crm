@@ -24,8 +24,18 @@ const BASICS = {
 };
 
 const USERS = [
-  { id: "11111111-1111-1111-1111-111111111111", email: "owner@example.com", role: "owner" },
-  { id: "22222222-2222-2222-2222-222222222222", email: "tech@example.com", role: "team_member" },
+  {
+    id: "11111111-1111-1111-1111-111111111111",
+    email: "owner@example.com",
+    role: "owner",
+    display_name: "",
+  },
+  {
+    id: "22222222-2222-2222-2222-222222222222",
+    email: "tech@example.com",
+    role: "team_member",
+    display_name: "",
+  },
 ];
 
 function appointment(overrides: Partial<Appointment> = {}): Appointment {
@@ -35,6 +45,7 @@ function appointment(overrides: Partial<Appointment> = {}): Appointment {
     lead_name: "Pat Customer",
     assigned_to: USERS[1].id,
     assignee_email: "tech@example.com",
+    assignee_name: null,
     subject: "Roof survey",
     notes: "",
     start_at: "2026-08-20T14:00:00Z",
@@ -42,6 +53,7 @@ function appointment(overrides: Partial<Appointment> = {}): Appointment {
     timezone: "UTC",
     status: "scheduled",
     origin: "staff",
+    revision: 1,
     booking_reference: "APT-ABCD1234",
     cancellation_reason: null,
     created_at: "2026-08-09T12:00:00Z",
@@ -92,8 +104,8 @@ test("the week grid places each appointment by its start time and duration", asy
   expect((block as HTMLElement).style.height).toBe("3.5rem");
 
   expect(screen.getByText(/Times are shown in UTC/)).toBeInTheDocument();
-  // A time axis with hour labels, and seven day columns.
-  expect(screen.getByText("07:00")).toBeInTheDocument();
+  // A localized time axis with one label per visible hour, and seven day columns.
+  expect(document.querySelectorAll(".time-axis-label").length).toBe(12);
   expect(document.querySelectorAll(".day-column").length).toBe(7);
   expect(document.querySelectorAll(".time-grid-head > div").length).toBe(8); // axis + 7 days
   vi.useRealTimers();

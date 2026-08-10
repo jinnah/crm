@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/auth-context";
+import { notifyBrandingChanged } from "@/components/brand-mark";
 import { BrandingSection } from "@/components/settings/branding-section";
 import {
   Button,
@@ -16,8 +17,10 @@ import {
   errorDetail,
   WEEKDAY_KEYS,
   WEEKDAY_LABELS,
+  type AssignableUser,
   type CommunicationSettings,
   type SchedulingSettings,
+  type VoiceSettings,
 } from "@/lib/api";
 
 /* ----------------------------------------------------------------------- */
@@ -31,7 +34,8 @@ type SectionKey =
   | "response"
   | "scheduling"
   | "availability"
-  | "notifications";
+  | "notifications"
+  | "voice";
 
 const SECTIONS: ReadonlyArray<{ key: SectionKey; label: string }> = [
   { key: "business", label: "Business & branding" },
@@ -41,6 +45,7 @@ const SECTIONS: ReadonlyArray<{ key: SectionKey; label: string }> = [
   { key: "scheduling", label: "Scheduling rules" },
   { key: "availability", label: "Availability" },
   { key: "notifications", label: "Appointment notifications" },
+  { key: "voice", label: "Voice calls" },
 ];
 
 /** Which fields each section owns, for dirty tracking and saving. */
@@ -81,7 +86,27 @@ const SCHED_FIELDS: Partial<Record<SectionKey, Array<keyof SchedulingSettings>>>
   ],
 };
 
+const VOICE_FIELDS: Array<keyof VoiceSettings> = [
+  "voice_ack_enabled",
+  "voice_ack_template",
+  "voice_alert_enabled",
+  "voice_alert_template",
+  "voice_alert_recipients",
+  "voice_default_staff_id",
+  "voice_transcript_retention_enabled",
+  "voice_transcript_retention_days",
+];
+
 const MESSAGE_VARIABLES = ["lead_name", "business_name", "source", "lead_id"];
+const VOICE_VARIABLES = [
+  "lead_name",
+  "business_name",
+  "service_requested",
+  "call_summary",
+  "callback_window",
+  "assigned_staff",
+  "lead_id",
+];
 const APPOINTMENT_VARIABLES = [
   "lead_name",
   "business_name",
@@ -103,8 +128,11 @@ export default function SettingsPage() {
 
   const [savedComm, setSavedComm] = useState<CommunicationSettings | null>(null);
   const [savedSched, setSavedSched] = useState<SchedulingSettings | null>(null);
+  const [savedVoice, setSavedVoice] = useState<VoiceSettings | null>(null);
   const [comm, setComm] = useState<CommunicationSettings | null>(null);
   const [sched, setSched] = useState<SchedulingSettings | null>(null);
+  const [voice, setVoice] = useState<VoiceSettings | null>(null);
+  const [staff, setStaff] = useState<AssignableUser[]>([]);
   const [section, setSection] = useState<SectionKey>("business");
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -129,10 +157,27 @@ export default function SettingsPage() {
         setSched(result.data);
       }
     });
+    void api<VoiceSettings>("/settings/voice").then((result) => {
+      if (cancelled) return;
+      if (result.ok && result.data !== null) {
+        setSavedVoice(result.data);
+        setVoice(result.data);
+      }
+    });
+    void api<AssignableUser[]>("/leads/assignable-users").then((result) => {
+      if (!cancelled && result.ok && result.data !== null) setStaff(result.data);
+    });
     return () => {
       cancelled = true;
     };
   }, [isOwner]);
+
+  // A saved confirmation should register, then get out of the way.
+  useEffect(() => {
+    if (notice === null) return;
+    const timer = window.setTimeout(() => setNotice(null), 5000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
 
   const dirtySections = useMemo(() => {
     const dirty = new Set<SectionKey>();
@@ -146,8 +191,15 @@ export default function SettingsPage() {
         if (schedFields.some((field) => !same(sched[field], savedSched[field]))) dirty.add(key);
       }
     }
+    if (
+      savedVoice !== null &&
+      voice !== null &&
+      VOICE_FIELDS.some((field) => !same(voice[field], savedVoice[field]))
+    ) {
+      dirty.add("voice");
+    }
     return dirty;
-  }, [comm, savedComm, sched, savedSched]);
+  }, [comm, savedComm, sched, savedSched, voice, savedVoice]);
 
   // Leaving the page with unsaved edits gets a browser warning.
   useEffect(() => {
@@ -187,6 +239,7 @@ export default function SettingsPage() {
     if (dirtySections.has(section)) {
       setComm(savedComm);
       setSched(savedSched);
+      setVoice(savedVoice);
     }
     setError(null);
     setNotice(null);
@@ -212,6 +265,8 @@ export default function SettingsPage() {
         }
         setSavedComm(result.data);
         setComm(result.data);
+        // The shell shows the business name; let it refresh immediately.
+        if (key === "business") notifyBrandingChanged();
       }
       const schedFields = SCHED_FIELDS[key];
       if (schedFields && sched !== null) {
@@ -227,6 +282,27 @@ export default function SettingsPage() {
         }
         setSavedSched(result.data);
         setSched(result.data);
+      }
+      if (key === "voice" && voice !== null) {
+        const body: Record<string, unknown> = Object.fromEntries(
+          VOICE_FIELDS.map((field) => [field, voice[field]]),
+        );
+        if (voice.voice_default_staff_id === null) {
+          // Clearing is an explicit request, never an omitted field.
+          delete body.voice_default_staff_id;
+          body.clear_default_staff = true;
+        }
+        const result = await api<VoiceSettings>("/settings/voice", {
+          method: "PATCH",
+          csrfToken,
+          body,
+        });
+        if (!result.ok || result.data === null) {
+          setError(errorDetail(result.data, "Unable to save these settings."));
+          return;
+        }
+        setSavedVoice(result.data);
+        setVoice(result.data);
       }
       setNotice(`${sectionLabel} saved.`);
     } finally {
@@ -244,7 +320,11 @@ export default function SettingsPage() {
     value: SchedulingSettings[K],
   ) => setSched((current) => (current === null ? current : { ...current, [key]: value }));
 
+  const updateVoice = <K extends keyof VoiceSettings>(key: K, value: VoiceSettings[K]) =>
+    setVoice((current) => (current === null ? current : { ...current, [key]: value }));
+
   const schedReady = sched !== null && savedSched !== null;
+  const voiceReady = voice !== null && savedVoice !== null;
   const currentLabel = SECTIONS.find((entry) => entry.key === section)?.label ?? "Settings";
 
   return (
@@ -254,19 +334,21 @@ export default function SettingsPage() {
         description="How your business presents itself, captures leads and runs its schedule."
       />
 
-      <SectionNav
-        sections={SECTIONS}
-        active={section}
-        onSelect={switchSection}
-        label="Settings sections"
-      />
+      <div className="settings-layout">
+        <SectionNav
+          sections={SECTIONS}
+          active={section}
+          onSelect={switchSection}
+          label="Settings sections"
+        />
 
-      {error !== null && <InlineError>{error}</InlineError>}
-      {notice !== null && <InlineSuccess>{notice}</InlineSuccess>}
+        <div className="settings-content">
+          {error !== null && <InlineError>{error}</InlineError>}
+          {notice !== null && <InlineSuccess>{notice}</InlineSuccess>}
 
-      <div className="stack narrow-form">
+          <div className="stack narrow-form">
         {section === "business" && (
-          <>
+          <div className="settings-two-col">
             <Card
               title="Business profile"
               description="The name customers see in messages and on booking pages."
@@ -287,7 +369,7 @@ export default function SettingsPage() {
               />
             </Card>
             <BrandingSection csrfToken={csrfToken} />
-          </>
+          </div>
         )}
 
         {section === "intake" && (
@@ -651,12 +733,155 @@ export default function SettingsPage() {
           </Card>
         )}
 
+        {section === "voice" && voiceReady && (
+          <Card
+            title="Voice calls"
+            description="What happens after the AI phone agent captures a call. The agent itself is configured in n8n; these controls decide the CRM's messages and retention."
+          >
+            <div className="form-field form-field-checkbox">
+              <label htmlFor="voice-ack-enabled">
+                <input
+                  id="voice-ack-enabled"
+                  type="checkbox"
+                  checked={voice.voice_ack_enabled}
+                  onChange={(event) => updateVoice("voice_ack_enabled", event.target.checked)}
+                />{" "}
+                Text the caller an acknowledgment after a successfully captured call
+              </label>
+            </div>
+            <TemplateField
+              id="voice-ack-template"
+              label="Caller acknowledgment message"
+              value={voice.voice_ack_template}
+              onChange={(value) => updateVoice("voice_ack_template", value)}
+              variables={VOICE_VARIABLES}
+              disabled={!voice.voice_ack_enabled}
+            />
+
+            <div className="form-field form-field-checkbox">
+              <label htmlFor="voice-alert-enabled">
+                <input
+                  id="voice-alert-enabled"
+                  type="checkbox"
+                  checked={voice.voice_alert_enabled}
+                  onChange={(event) => updateVoice("voice_alert_enabled", event.target.checked)}
+                />{" "}
+                Send a staff alert about the new call
+              </label>
+            </div>
+            <div className="form-field">
+              <label htmlFor="voice-alert-recipients">Alert goes to</label>
+              <select
+                id="voice-alert-recipients"
+                disabled={!voice.voice_alert_enabled}
+                value={voice.voice_alert_recipients}
+                onChange={(event) =>
+                  updateVoice(
+                    "voice_alert_recipients",
+                    event.target.value as VoiceSettings["voice_alert_recipients"],
+                  )
+                }
+              >
+                <option value="business">The business number</option>
+                <option value="assigned">The assigned staff member</option>
+                <option value="both">Both</option>
+              </select>
+              <p className="form-help">
+                Staff alerts use each person&apos;s notification phone from the Users page. If the
+                assigned person has none, the alert falls back to the business number and the call
+                is flagged for attention.
+              </p>
+            </div>
+            <TemplateField
+              id="voice-alert-template"
+              label="Staff alert message"
+              value={voice.voice_alert_template}
+              onChange={(value) => updateVoice("voice_alert_template", value)}
+              variables={VOICE_VARIABLES}
+              disabled={!voice.voice_alert_enabled}
+            />
+
+            <div className="form-field">
+              <label htmlFor="voice-default-staff">Default staff member for phone bookings</label>
+              <select
+                id="voice-default-staff"
+                value={voice.voice_default_staff_id ?? ""}
+                onChange={(event) =>
+                  updateVoice("voice_default_staff_id", event.target.value || null)
+                }
+              >
+                <option value="">None — the agent records a preference instead of booking</option>
+                {staff.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.display_name || option.email}
+                  </option>
+                ))}
+              </select>
+              <p className="form-help">
+                Used when a caller&apos;s lead has no assigned staff member. Bookings follow the
+                same rules as the public booking page.
+              </p>
+            </div>
+
+            <div className="form-field form-field-checkbox">
+              <label htmlFor="voice-retention-enabled">
+                <input
+                  id="voice-retention-enabled"
+                  type="checkbox"
+                  checked={voice.voice_transcript_retention_enabled}
+                  onChange={(event) =>
+                    updateVoice("voice_transcript_retention_enabled", event.target.checked)
+                  }
+                />{" "}
+                Keep full call transcripts (off by default)
+              </label>
+            </div>
+            <div className="form-field">
+              <label htmlFor="voice-retention-days">Delete transcripts after (days)</label>
+              <input
+                id="voice-retention-days"
+                type="number"
+                min={1}
+                max={365}
+                disabled={!voice.voice_transcript_retention_enabled}
+                aria-describedby="voice-retention-help"
+                value={voice.voice_transcript_retention_days}
+                onChange={(event) =>
+                  updateVoice(
+                    "voice_transcript_retention_days",
+                    Math.min(365, Math.max(1, Number(event.target.value) || 1)),
+                  )
+                }
+              />
+              <p id="voice-retention-help" className="form-help">
+                Transcripts are stored only for calls where the caller heard the disclosure and
+                did not object. After the retention period the transcript and recording reference
+                are purged; the call&apos;s summary, outcome and audit record remain.
+              </p>
+            </div>
+            <SaveBar
+              dirty={dirtySections.has("voice")}
+              saving={saving}
+              label="Save voice call settings"
+              onSave={() => void saveSection("voice", currentLabel)}
+            />
+          </Card>
+        )}
+
         {(section === "scheduling" || section === "availability" || section === "notifications") &&
           !schedReady && (
             <p className="page-status" role="status">
               Loading scheduling settings…
             </p>
           )}
+
+        {section === "voice" && !voiceReady && (
+          <p className="page-status" role="status">
+            Loading voice settings…
+          </p>
+        )}
+          </div>
+        </div>
       </div>
     </section>
   );

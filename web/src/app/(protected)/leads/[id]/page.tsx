@@ -251,7 +251,18 @@ export default function LeadDetailPage() {
             canSchedule={canManage || lead.assigned_to === user.id}
             // A team member may only ever schedule for themselves, so that is
             // the only option they are offered.
-            users={canManage ? users : [{ id: user.id, email: user.email, role: user.role }]}
+            users={
+              canManage
+                ? users
+                : [
+                    {
+                      id: user.id,
+                      email: user.email,
+                      role: user.role,
+                      display_name: user.display_name,
+                    },
+                  ]
+            }
             onChanged={reload}
           />
           <Timeline activities={activities} />

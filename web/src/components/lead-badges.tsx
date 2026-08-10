@@ -5,6 +5,7 @@ export function statusLabel(status: string): string {
 }
 
 export function sourceLabel(source: string): string {
+  if (source === "voice_call") return "voice call";
   return source.replace(/_/g, " ");
 }
 

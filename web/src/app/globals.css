@@ -818,9 +818,12 @@ input[type="radio"] {
    Tabs / section navigation
    ========================================================================== */
 
+/* Below desktop: one horizontally scrollable row — tabs never wrap, so no
+   orphan lines. On desktop the settings layout turns this into a side nav. */
 .section-nav {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
   gap: var(--sp-0-5);
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-3);
@@ -836,6 +839,8 @@ input[type="radio"] {
   border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .section-nav button[aria-selected="true"] {
@@ -847,6 +852,63 @@ input[type="radio"] {
 .section-nav button:hover:not([aria-selected="true"]) {
   color: var(--text);
   background: var(--surface-sunken);
+}
+
+/* --- Settings layout --------------------------------------------------- */
+
+.settings-layout,
+.settings-content {
+  min-width: 0;
+}
+
+.settings-two-col {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--sp-3);
+  align-items: start;
+}
+
+@media (min-width: 1024px) {
+  .settings-layout {
+    display: grid;
+    grid-template-columns: 13rem minmax(0, 1fr);
+    gap: var(--sp-4);
+    align-items: start;
+  }
+
+  .settings-layout .section-nav {
+    flex-direction: column;
+    overflow-x: visible;
+    align-items: stretch;
+    border-bottom: none;
+    position: sticky;
+    top: var(--sp-3);
+    margin-bottom: 0;
+    gap: 2px;
+  }
+
+  .settings-layout .section-nav button {
+    text-align: left;
+    white-space: normal;
+    border-bottom: none;
+    border-left: 3px solid transparent;
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    margin-bottom: 0;
+  }
+
+  .settings-layout .section-nav button[aria-selected="true"] {
+    border-left-color: var(--primary);
+    background: var(--surface-sunken);
+  }
+
+  /* The side nav carries the width budget; let paired cards use the rest. */
+  .settings-content .narrow-form {
+    max-width: 52rem;
+  }
+
+  .settings-two-col {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
 }
 
 /* ==========================================================================
@@ -907,10 +969,16 @@ input[type="radio"] {
   font-size: var(--text-base);
 }
 
+/* Up to two lines before truncating; the element's title attribute keeps the
+   complete name reachable. */
 .brand-name {
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
   min-width: 0;
 }
 
@@ -1456,6 +1524,18 @@ input[type="radio"] {
   color: var(--text-secondary);
 }
 
+/* One toolbar, distinct groups: view · navigation+range · staff · zone. */
+.calendar-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.calendar-staff select {
+  max-width: 13rem;
+}
+
 /* --- Time grid (day and week) ----------------------------------------- */
 
 .time-grid-card {
@@ -1523,19 +1603,35 @@ input[type="radio"] {
   border-top: 1px solid var(--border);
 }
 
+/* Hours outside the business day: a quiet, even tint — no hatching. */
 .closed-hours {
   position: absolute;
   left: 0;
   right: 0;
-  background: repeating-linear-gradient(
-    -45deg,
-    transparent,
-    transparent 5px,
-    rgb(15 23 42 / 0.035) 5px,
-    rgb(15 23 42 / 0.035) 6px
-  );
-  background-color: rgb(15 23 42 / 0.025);
+  background: rgb(15 23 42 / 0.045);
   pointer-events: none;
+}
+
+/* Current time, drawn only on today's column. */
+.now-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-top: 2px solid var(--danger);
+  opacity: 0.7;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.now-line::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: -5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
 }
 
 .appointment-block {
@@ -1594,6 +1690,24 @@ input[type="radio"] {
   background: var(--danger-soft);
   border-color: var(--danger-soft-border);
   border-left-color: var(--danger);
+}
+
+/* A manually created appointment outside working hours: a visible exception,
+   not only a colour change. */
+.appointment-block.outside-hours {
+  border-style: dashed;
+  border-left-style: solid;
+}
+
+.appointment-block .block-icon {
+  display: inline-block;
+  vertical-align: -1px;
+  margin-left: 3px;
+  color: var(--text-secondary);
+}
+
+.appointment-block .block-meta {
+  color: var(--text-secondary);
 }
 
 /* --- Agenda ------------------------------------------------------------ */

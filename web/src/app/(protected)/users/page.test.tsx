@@ -28,14 +28,19 @@ test("owners see the user list, row actions and the creation dialog", async () =
       "/users",
       {
         status: 200,
-        body: [
-          makeUser(),
-          makeUser({
-            id: "22222222-2222-2222-2222-222222222222",
-            email: "member@example.com",
-            role: "team_member",
-          }),
-        ],
+        body: {
+          items: [
+            makeUser(),
+            makeUser({
+              id: "22222222-2222-2222-2222-222222222222",
+              email: "member@example.com",
+              role: "team_member",
+            }),
+          ],
+          total: 2,
+          page: 1,
+          page_size: 25,
+        },
       },
     ],
   ]);
@@ -45,10 +50,14 @@ test("owners see the user list, row actions and the creation dialog", async () =
   expect(screen.getByRole("heading", { name: "Users" })).toBeInTheDocument();
   expect(screen.getAllByText("Team member").length).toBeGreaterThan(0); // role badge
 
-  // Destructive and sensitive actions sit behind the per-row menu.
-  const menus = screen.getAllByRole("button", { name: "Actions" });
+  // The row shows one styled badge and no unconfirmed inline role control.
+  expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+
+  // Destructive and sensitive actions sit behind the per-row menu,
+  // labelled with the user it acts on.
+  const menus = screen.getAllByRole("button", { name: /^Actions for / });
   expect(menus.length).toBe(2);
-  fireEvent.click(menus[1]);
+  fireEvent.click(screen.getByRole("button", { name: "Actions for member@example.com" }));
   expect(screen.getByRole("menuitem", { name: "Set temporary password" })).toBeInTheDocument();
   expect(screen.getByRole("menuitem", { name: "Deactivate" })).toBeInTheDocument();
 

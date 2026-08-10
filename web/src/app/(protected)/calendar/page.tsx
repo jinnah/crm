@@ -1,10 +1,18 @@
 "use client";
 
-import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  CalendarDays,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Globe,
+  Phone,
+  TriangleAlert,
+} from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@/components/auth-context";
-import { Button, Card, EmptyState, InlineError } from "@/components/ui";
+import { Button, Card, EmptyState, InlineError, PageHeader } from "@/components/ui";
 import {
   api,
   errorDetail,
@@ -36,6 +44,13 @@ const VIEW_SPAN: Record<View, number> = { day: 1, week: 7, agenda: 14 };
 
 const HOUR_HEIGHT_REM = 3.5;
 
+/** Accessible-name suffix per origin; staff-created is the unmarked default. */
+const ORIGIN_LABELS: Record<Appointment["origin"], string> = {
+  staff: "",
+  customer: ", booked online",
+  voice: ", booked by phone",
+};
+
 export default function CalendarPage() {
   const { user } = useAuth();
   const canManage = user.role === "owner" || user.role === "manager";
@@ -55,6 +70,13 @@ export default function CalendarPage() {
   const [anchor, setAnchor] = useState<string | null>(null);
   const [staffFilter, setStaffFilter] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  // Re-rendered each minute so the current-time line tracks the clock.
+  const [nowIso, setNowIso] = useState(() => new Date().toISOString());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNowIso(new Date().toISOString()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -176,7 +198,7 @@ export default function CalendarPage() {
   }
 
   const step = view === "week" ? 7 : view === "agenda" ? 14 : 1;
-  const today = dayKeyInZone(new Date().toISOString(), timezone);
+  const today = dayKeyInZone(nowIso, timezone);
   const rangeLabel =
     view === "day"
       ? formatDayInZone(`${rangeStart}T12:00:00Z`, "UTC")
@@ -187,7 +209,7 @@ export default function CalendarPage() {
 
   return (
     <section className="calendar-page">
-      <h1 className="visually-hidden">Calendar</h1>
+      <PageHeader title="Calendar" />
       <div className="calendar-toolbar">
         <div className="segmented" role="group" aria-label="Calendar view">
           {VIEWS.map((option) => (
@@ -201,7 +223,7 @@ export default function CalendarPage() {
             </button>
           ))}
         </div>
-        <div className="button-row">
+        <div className="calendar-group" role="group" aria-label="Date navigation">
           <Button
             size="sm"
             aria-label="Previous"
@@ -219,10 +241,10 @@ export default function CalendarPage() {
           >
             <ChevronRight size={16} aria-hidden="true" />
           </Button>
+          <span className="calendar-range">{rangeLabel}</span>
         </div>
-        <span className="calendar-range">{rangeLabel}</span>
         {canManage && (
-          <div className="form-field">
+          <div className="form-field calendar-staff">
             <label htmlFor="calendar-staff">Staff</label>
             <select
               id="calendar-staff"
@@ -232,7 +254,7 @@ export default function CalendarPage() {
               <option value="">Everyone</option>
               {users.map((option) => (
                 <option key={option.id} value={option.id}>
-                  {option.email}
+                  {option.display_name || option.email}
                 </option>
               ))}
             </select>
@@ -255,6 +277,7 @@ export default function CalendarPage() {
           byDay={byDay}
           timezone={timezone}
           today={today}
+          nowMinutes={minutesInZone(nowIso, timezone)}
           businessHours={basics?.business_hours ?? null}
           gridStartHour={gridStartHour}
           gridEndHour={gridEndHour}
@@ -313,8 +336,13 @@ function AgendaView({
                 {appointment.status !== "scheduled" && (
                   <StatusBadge status={appointment.status} />
                 )}
-                {appointment.assignee_email !== null && (
-                  <span className="agenda-detail">{appointment.assignee_email}</span>
+                {appointment.origin !== "staff" && (
+                  <span className="badge">
+                    {appointment.origin === "voice" ? "Phone call" : "Booked online"}
+                  </span>
+                )}
+                {appointment.assignee_name !== null && (
+                  <span className="agenda-detail">{appointment.assignee_name}</span>
                 )}
               </li>
             ))}
@@ -404,6 +432,7 @@ function TimeGrid({
   byDay,
   timezone,
   today,
+  nowMinutes,
   businessHours,
   gridStartHour,
   gridEndHour,
@@ -412,6 +441,7 @@ function TimeGrid({
   byDay: Map<string, Appointment[]>;
   timezone: string;
   today: string;
+  nowMinutes: number;
   businessHours: Record<string, string[][]> | null;
   gridStartHour: number;
   gridEndHour: number;
@@ -448,7 +478,7 @@ function TimeGrid({
         <div className="time-axis" aria-hidden="true" style={{ height: `${totalHeight}rem` }}>
           {Array.from({ length: hourCount }, (_, index) => (
             <div key={index} className="time-axis-label">
-              {String(gridStartHour + index).padStart(2, "0")}:00
+              {hourLabel(gridStartHour + index)}
             </div>
           ))}
         </div>
@@ -483,35 +513,67 @@ function TimeGrid({
                   }}
                 />
               ))}
-              {positioned.map(({ appointment, top, height, lane, lanes }) => (
-                <Link
-                  key={appointment.id}
-                  href={`/leads/${appointment.lead_id}`}
-                  className={`appointment-block status-${appointment.status}`}
-                  style={{
-                    top: `${toRem(top)}rem`,
-                    height: `${toRem(height)}rem`,
-                    left: `calc(${(lane / lanes) * 100}% + 2px)`,
-                    width: `calc(${100 / lanes}% - 5px)`,
-                  }}
-                  aria-label={`${formatTimeInZone(appointment.start_at, timezone)} ${
-                    appointment.lead_name ?? "Lead"
-                  }: ${appointment.subject}${
-                    appointment.status !== "scheduled"
-                      ? ` (${APPOINTMENT_STATUS_LABELS[appointment.status]})`
-                      : ""
-                  }`}
-                >
-                  <span className="block-time">
-                    {formatTimeInZone(appointment.start_at, timezone)}
-                  </span>{" "}
-                  <span className="block-title">{appointment.lead_name ?? "Lead"}</span>
-                  {height >= 45 && <span className="block-title">{appointment.subject}</span>}
-                  {height >= 70 && appointment.assignee_email !== null && lanes === 1 && (
-                    <span className="block-title">{appointment.assignee_email}</span>
-                  )}
-                </Link>
-              ))}
+              {day === today && nowMinutes >= gridStartMin && nowMinutes <= gridEndMin && (
+                <div
+                  className="now-line"
+                  style={{ top: `${toRem(nowMinutes - gridStartMin)}rem` }}
+                  aria-hidden="true"
+                />
+              )}
+              {positioned.map(({ appointment, top, height, lane, lanes }) => {
+                const startMin = minutesInZone(appointment.start_at, timezone);
+                const rawEndMin = minutesInZone(appointment.end_at, timezone);
+                // A manually created appointment outside working hours gets an
+                // explicit exception treatment; booking flows can never make one.
+                const outsideHours =
+                  appointment.status !== "canceled" &&
+                  !withinOpenWindows(windows, startMin, rawEndMin > startMin ? rawEndMin : 24 * 60);
+                return (
+                  <Link
+                    key={appointment.id}
+                    href={`/leads/${appointment.lead_id}`}
+                    className={`appointment-block status-${appointment.status}${
+                      outsideHours ? " outside-hours" : ""
+                    }`}
+                    style={{
+                      top: `${toRem(top)}rem`,
+                      height: `${toRem(height)}rem`,
+                      left: `calc(${(lane / lanes) * 100}% + 2px)`,
+                      width: `calc(${100 / lanes}% - 5px)`,
+                    }}
+                    aria-label={`${formatTimeInZone(appointment.start_at, timezone)} ${
+                      appointment.lead_name ?? "Lead"
+                    }: ${appointment.subject}${
+                      appointment.status !== "scheduled"
+                        ? ` (${APPOINTMENT_STATUS_LABELS[appointment.status]})`
+                        : ""
+                    }${ORIGIN_LABELS[appointment.origin]}${
+                      outsideHours ? ", outside business hours" : ""
+                    }`}
+                  >
+                    <span className="block-time">
+                      {formatTimeInZone(appointment.start_at, timezone)}
+                      {appointment.origin === "customer" && (
+                        <Globe size={11} className="block-icon" aria-hidden="true" />
+                      )}
+                      {appointment.origin === "voice" && (
+                        <Phone size={11} className="block-icon" aria-hidden="true" />
+                      )}
+                      {appointment.status === "completed" && (
+                        <Check size={11} className="block-icon" aria-hidden="true" />
+                      )}
+                      {appointment.status === "no_show" && (
+                        <TriangleAlert size={11} className="block-icon" aria-hidden="true" />
+                      )}
+                    </span>{" "}
+                    <span className="block-title">{appointment.lead_name ?? "Lead"}</span>
+                    {height >= 45 && <span className="block-title">{appointment.subject}</span>}
+                    {height >= 70 && appointment.assignee_name !== null && lanes === 1 && (
+                      <span className="block-title block-meta">{appointment.assignee_name}</span>
+                    )}
+                  </Link>
+                );
+              })}
             </div>
           );
         })}
@@ -538,6 +600,17 @@ function closedSegments(
   }
   if (cursor < gridEndMin) closed.push([cursor, gridEndMin]);
   return closed.filter(([from, to]) => to > from);
+}
+
+/** True when the whole span sits inside one open business-hours window. */
+function withinOpenWindows(windows: string[][], startMin: number, endMin: number): boolean {
+  const toMinutes = (value: string) => Number(value.slice(0, 2)) * 60 + Number(value.slice(3));
+  return windows.some(([from, to]) => toMinutes(from) <= startMin && endMin <= toMinutes(to));
+}
+
+/** Locale-aware hour label — "8 AM" or "08" depending on the user's locale. */
+function hourLabel(hour: number): string {
+  return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).format(new Date(2000, 0, 1, hour));
 }
 
 function shortDayLabel(day: string): string {

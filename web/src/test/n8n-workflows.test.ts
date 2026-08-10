@@ -82,6 +82,8 @@ function metaItem(payload: unknown, sign = true): Item {
   };
 }
 
+const VOICE_ENV = { ...ENV, VOICE_INTAKE_SECRET: "test-voice-intake-secret" };
+
 describe("website form intake", () => {
   const workflow = loadWorkflow("website-form-intake.json");
   const valid = {
@@ -407,6 +409,8 @@ describe("workflow hygiene", () => {
       "twilio-sms.json",
       "twilio-status.json",
       "twilio-voice.json",
+      "voice-call-intake.json",
+      "voice-transcript-cleanup.json",
       "website-form-intake.json",
     ]);
   });
@@ -928,3 +932,167 @@ describe("appointment reminder dispatch", () => {
     }
   });
 });
+
+describe("voice call intake", () => {
+  const workflow = loadWorkflow("voice-call-intake.json");
+
+  function normalize(body: Record<string, unknown>, secret = "test-voice-intake-secret") {
+    return runCodeNode(
+      workflow,
+      "Normalize",
+      [{ json: { headers: { "x-voice-secret": secret }, body } }],
+      VOICE_ENV,
+    );
+  }
+
+  const VALID = {
+    call_sid: "CAvoicewf0000000000000000000001",
+    caller_phone: "+15550800001",
+    caller_name: "Workflow Caller",
+    call_status: "completed",
+    service_requested: "Gutter repair",
+    summary: "Caller wants a gutter quote.",
+    urgency: "normal",
+    transfer_outcome: "none",
+    consent_result: "granted",
+  };
+
+  test("rejects a missing or wrong shared secret", () => {
+    const [wrong] = normalize(VALID, "wrong-secret-value-here!");
+    expect(wrong.json).toMatchObject({ reject: true, status: 401 });
+    const [absent] = runCodeNode(
+      workflow,
+      "Normalize",
+      [{ json: { headers: {}, body: VALID } }],
+      VOICE_ENV,
+    );
+    expect(absent.json).toMatchObject({ reject: true, status: 401 });
+  });
+
+  test("requires a CallSid and maps only documented fields", () => {
+    const [missing] = normalize({ ...VALID, call_sid: "" });
+    expect(missing.json).toMatchObject({ reject: true, status: 422 });
+
+    const [mapped] = normalize({
+      ...VALID,
+      surprise_field: "dropped",
+      internal_lead_id: "should never travel",
+    });
+    expect(mapped.json.reject).toBe(false);
+    const event = mapped.json.event as Record<string, unknown>;
+    expect(event.call_sid).toBe(VALID.call_sid);
+    expect(event).not.toHaveProperty("surprise_field");
+    expect(event).not.toHaveProperty("internal_lead_id");
+  });
+
+  test("bounds every field and normalizes bad enums", () => {
+    const [result] = normalize({
+      ...VALID,
+      summary: "x".repeat(5000),
+      urgency: "catastrophic",
+      call_status: "weird",
+      duration_seconds: 999999,
+    });
+    const event = result.json.event as Record<string, unknown>;
+    expect(String(event.summary).length).toBe(2000);
+    expect(event.urgency).toBe("normal");
+    expect(event.call_status).toBe("completed");
+    expect(event.duration_seconds).toBe(21600);
+  });
+
+  test("uses the voice or inbound key from env and never retries permanent rejections", () => {
+    const attempts = workflow.nodes.filter((node) => node.name.startsWith("CRM Voice Write"));
+    expect(attempts.length).toBe(3);
+    for (const attempt of attempts) {
+      expect(String(attempt.parameters.url)).toContain("/inbound/voice-calls/completed");
+      const headers = JSON.stringify(attempt.parameters.headerParameters);
+      expect(headers).toContain("$env.CRM_VOICE_API_KEY");
+      expect(headers).toContain("$env.CRM_INBOUND_API_KEY");
+      expect(attempt.retryOnFail ?? false).toBe(false);
+    }
+    const classify = (nodeName: string, statusCode: number) => {
+      const node = workflow.nodes.find((candidate) => candidate.name === nodeName)!;
+      const nodeRequire = createRequire(import.meta.url);
+      const fn = new Function(
+        "$input",
+        "$env",
+        "require",
+        "Buffer",
+        String(node.parameters.jsCode),
+      );
+      return fn({ all: () => [{ json: { statusCode, body: {} } }] }, ENV, nodeRequire, Buffer);
+    };
+    // The 409 identity conflict is permanent — retrying it would hammer a
+    // deliberate refusal.
+    for (const name of ["Classify Voice", "Classify Voice 2", "Classify Voice 3"]) {
+      expect(classify(name, 409)[0].json.outcome).toBe("permanent");
+      expect(classify(name, 422)[0].json.outcome).toBe("permanent");
+    }
+    expect(classify("Classify Voice", 503)[0].json.outcome).toBe("retry");
+    expect(classify("Classify Voice 3", 503)[0].json.outcome).toBe("exhausted");
+  });
+
+  test("classifier output never carries transcripts or caller details", () => {
+    const node = workflow.nodes.find((candidate) => candidate.name === "Classify Voice")!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    const [result] = fn(
+      {
+        all: () => [
+          {
+            json: {
+              statusCode: 500,
+              body: { transcript_text: "secret words", caller_phone: "+15550800001" },
+            },
+          },
+        ],
+      },
+      ENV,
+      nodeRequire,
+      Buffer,
+    ) as Array<{ json: Record<string, unknown> }>;
+    const serialized = JSON.stringify(result.json);
+    expect(serialized).not.toContain("secret words");
+    expect(serialized).not.toContain("+1555");
+  });
+});
+
+describe("voice transcript cleanup", () => {
+  const workflow = loadWorkflow("voice-transcript-cleanup.json");
+
+  test("runs on a daily schedule against the cleanup endpoint", () => {
+    const trigger = workflow.nodes.find((node) => node.type.endsWith("scheduleTrigger"));
+    expect(trigger).toBeDefined();
+    expect(workflow.nodes.some((node) => node.type.endsWith("webhook"))).toBe(false);
+    const attempts = workflow.nodes.filter((node) => node.name.startsWith("CRM Cleanup"));
+    expect(attempts.length).toBe(3);
+    for (const attempt of attempts) {
+      expect(String(attempt.parameters.url)).toContain("/inbound/voice-calls/cleanup");
+      expect(attempt.retryOnFail ?? false).toBe(false);
+    }
+  });
+
+  test("the sweep summary carries counts only", () => {
+    const node = workflow.nodes.find((candidate) => candidate.name === "Summarize Sweep")!;
+    const nodeRequire = createRequire(import.meta.url);
+    const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+    const [result] = fn(
+      {
+        all: () => [
+          {
+            json: {
+              statusCode: 200,
+              body: { purged_transcripts: 3, purged_recordings: 1, secret: "leak" },
+            },
+          },
+        ],
+      },
+      ENV,
+      nodeRequire,
+      Buffer,
+    ) as Array<{ json: Record<string, unknown> }>;
+    expect(result.json).toMatchObject({ purged_transcripts: 3, purged_recordings: 1 });
+    expect(JSON.stringify(result.json)).not.toContain("leak");
+  });
+});
+

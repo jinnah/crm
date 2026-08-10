@@ -129,7 +129,10 @@ function Shell({ children }: { children: ReactNode }) {
   const brand = (
     <span className="shell-brand">
       <BrandMark branding={branding} />
-      <span className="brand-name">{businessName}</span>
+      {/* Two lines before truncating; the title carries the complete name. */}
+      <span className="brand-name" title={businessName}>
+        {businessName}
+      </span>
     </span>
   );
 

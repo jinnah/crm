@@ -27,6 +27,7 @@ type PublicAppointment = {
   timezone: string;
   status: string;
   can_change: boolean;
+  revision: number;
   days: AvailabilityDay[];
 };
 
@@ -261,7 +262,12 @@ export default function PublicAppointmentPage() {
                     return;
                   }
                   void submit(
-                    { action: "reschedule", start_at: selected, website },
+                    {
+                      action: "reschedule",
+                      start_at: selected,
+                      expected_revision: appointment.revision,
+                      website,
+                    },
                     "Your appointment has been moved.",
                   );
                 }}

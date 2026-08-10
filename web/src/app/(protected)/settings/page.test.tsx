@@ -63,12 +63,34 @@ const BRANDING = {
   initials: "AR",
 };
 
+const VOICE = {
+  voice_ack_enabled: false,
+  voice_ack_template: "Thanks for calling {{business_name}}, {{lead_name}}.",
+  voice_alert_enabled: false,
+  voice_alert_template: "Voice lead: {{lead_name}} — {{call_summary}}",
+  voice_alert_recipients: "business",
+  voice_default_staff_id: null,
+  voice_transcript_retention_enabled: false,
+  voice_transcript_retention_days: 30,
+};
+
+const STAFF = [
+  {
+    id: "22222222-2222-2222-2222-222222222222",
+    email: "tech@example.com",
+    role: "team_member",
+    display_name: "Sam Field",
+  },
+];
+
 function renderSettings(role: "owner" | "manager" = "owner") {
   const fetchMock = stubFetchRoutes([
     ["/auth/session", { status: 200, body: { user: makeUser({ role }), csrf_token: "csrf" } }],
     ["/settings/communication", { status: 200, body: SETTINGS }],
     ["/settings/scheduling", { status: 200, body: SCHEDULING }],
     ["/settings/branding", { status: 200, body: BRANDING }],
+    ["/settings/voice", { status: 200, body: VOICE }],
+    ["/leads/assignable-users", { status: 200, body: STAFF }],
   ]);
   render(
     <ProtectedLayout>
@@ -98,6 +120,7 @@ test("owner lands on Business & branding with the section navigation", async () 
     "Scheduling rules",
     "Availability",
     "Appointment notifications",
+    "Voice calls",
   ]);
   // The branding manager is on the first section.
   expect(await screen.findByText(/Drag an image here/)).toBeInTheDocument();
@@ -186,6 +209,35 @@ test("a server validation error is surfaced on save", async () => {
   await waitFor(() =>
     expect(screen.getByRole("alert")).toHaveTextContent("Unknown template variables"),
   );
+});
+
+test("the voice section saves its settings and offers staff by display name", async () => {
+  const fetchMock = renderSettings();
+  await screen.findByLabelText("Business display name");
+  fireEvent.click(screen.getByRole("tab", { name: "Voice calls" }));
+
+  // Transcript retention is presented off by default with its day count gated.
+  const retention = await screen.findByLabelText(/Keep full call transcripts/);
+  expect(retention).not.toBeChecked();
+  expect(screen.getByLabelText("Delete transcripts after (days)")).toBeDisabled();
+
+  // Staff options use the display name, not the email address.
+  const staffSelect = screen.getByLabelText("Default staff member for phone bookings");
+  expect(staffSelect).toHaveTextContent("Sam Field");
+  expect(staffSelect).not.toHaveTextContent("tech@example.com");
+
+  fireEvent.click(screen.getByLabelText(/Text the caller an acknowledgment/));
+  fireEvent.click(screen.getByRole("button", { name: "Save voice call settings" }));
+
+  await waitFor(() => {
+    const patches = patchCalls(fetchMock, "/settings/voice");
+    expect(patches).toHaveLength(1);
+    const body = JSON.parse(String((patches[0][1] as RequestInit).body));
+    expect(body.voice_ack_enabled).toBe(true);
+    // No configured staff member: clearing travels as the explicit flag.
+    expect(body.clear_default_staff).toBe(true);
+    expect(body).not.toHaveProperty("voice_default_staff_id");
+  });
 });
 
 test("availability edits save through the weekday editor", async () => {

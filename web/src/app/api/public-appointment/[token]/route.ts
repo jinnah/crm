@@ -3,13 +3,18 @@ import { NextResponse } from "next/server";
 /**
  * Same-origin proxy for the customer's appointment page.
  *
- * The capability token in the path is the only authority the CRM accepts, so
- * this route forwards it and nothing else: no appointment id, no lead id, no
- * user id. The token is never logged.
+ * The capability travels onward in a JSON body on a fixed internal path with
+ * the server-only BFF credential, so no access log ever records it. Nothing
+ * but the action, the new time and the expected revision is forwarded — no
+ * appointment id, no lead id, no user id.
  */
 
 function apiBase(): string {
   return process.env.CRM_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://api:8000";
+}
+
+function internalKey(): string {
+  return process.env.INTERNAL_BFF_KEY ?? "";
 }
 
 const MAX_BODY_BYTES = 4 * 1024;
@@ -60,10 +65,15 @@ async function readBounded(request: Request): Promise<string | null> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function forward(path: string, init: RequestInit): Promise<NextResponse> {
+async function forward(path: string, payload: Record<string, unknown>): Promise<NextResponse> {
   try {
-    const response = await fetch(`${apiBase()}/api/v1/public/appointments/${path}`, {
-      ...init,
+    const response = await fetch(`${apiBase()}/api/v1/internal/appointments/${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Key": internalKey(),
+      },
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(30_000),
     });
     const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
@@ -85,7 +95,7 @@ export async function GET(_request: Request, context: { params: Promise<{ token:
   if (!TOKEN_PATTERN.test(token)) {
     return NextResponse.json({ detail: "This appointment link is not valid." }, { status: 404 });
   }
-  return forward(token, { method: "GET", headers: { Accept: "application/json" } });
+  return forward("info", { token });
 }
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
@@ -115,17 +125,19 @@ export async function POST(request: Request, context: { params: Promise<{ token:
   }
 
   if (body.action === "cancel") {
-    return forward(`${token}/cancel`, { method: "POST", headers: { Accept: "application/json" } });
+    return forward("cancel", { token });
   }
   const startAt = typeof body.start_at === "string" ? body.start_at.slice(0, 40) : "";
-  if (body.action !== "reschedule" || !startAt) {
+  const expectedRevision = Number(body.expected_revision);
+  if (body.action !== "reschedule" || !startAt || !Number.isInteger(expectedRevision)) {
     return NextResponse.json({ detail: "Choose a new time first." }, { status: 422 });
   }
   const website = typeof body.website === "string" ? body.website.slice(0, 100) : "";
-  // Only the new time and the honeypot travel onward.
-  return forward(`${token}/reschedule`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ start_at: startAt, website }),
+  // Only the new time, the revision the customer saw and the honeypot travel.
+  return forward("reschedule", {
+    token,
+    start_at: startAt,
+    expected_revision: expectedRevision,
+    website,
   });
 }

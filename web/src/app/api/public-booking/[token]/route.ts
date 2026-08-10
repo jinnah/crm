@@ -3,14 +3,19 @@ import { NextResponse } from "next/server";
 /**
  * Same-origin proxy for the public booking page.
  *
- * The browser talks only to this route, so the CRM's address never has to be
- * exposed to the public internet. The token stays in the path, is never
- * logged, and no lead or user identifier is ever accepted from the client:
- * the token is the only authority the CRM will honour.
+ * The browser talks only to this route. Onward, the capability travels in a
+ * JSON body on a fixed internal path together with the server-only BFF
+ * credential — so neither the CRM's access logs nor this route's logs ever
+ * see a token, a chosen time or a phone number. No identifier the client
+ * invents is forwarded: the token is the only authority the CRM will honour.
  */
 
 function apiBase(): string {
   return process.env.CRM_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://api:8000";
+}
+
+function internalKey(): string {
+  return process.env.INTERNAL_BFF_KEY ?? "";
 }
 
 const MAX_BODY_BYTES = 4 * 1024;
@@ -62,10 +67,15 @@ async function readBounded(request: Request): Promise<string | null> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
-async function forward(token: string, init: RequestInit): Promise<NextResponse> {
+async function forward(path: string, payload: Record<string, unknown>): Promise<NextResponse> {
   try {
-    const response = await fetch(`${apiBase()}/api/v1/public/book/${token}`, {
-      ...init,
+    const response = await fetch(`${apiBase()}/api/v1/internal/${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Internal-Key": internalKey(),
+      },
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(30_000),
     });
     const data = (await response.json().catch(() => ({}))) as Record<string, unknown>;
@@ -83,12 +93,16 @@ async function forward(token: string, init: RequestInit): Promise<NextResponse> 
   }
 }
 
-export async function GET(_request: Request, context: { params: Promise<{ token: string }> }) {
+export async function GET(request: Request, context: { params: Promise<{ token: string }> }) {
   const { token } = await context.params;
   if (!TOKEN_PATTERN.test(token)) {
     return NextResponse.json({ detail: "This booking link is not valid." }, { status: 404 });
   }
-  return forward(token, { method: "GET", headers: { Accept: "application/json" } });
+  const url = new URL(request.url);
+  const startDay = url.searchParams.get("start_day");
+  const payload: Record<string, unknown> = { token };
+  if (startDay && /^\d{4}-\d{2}-\d{2}$/.test(startDay)) payload.start_day = startDay;
+  return forward("booking/info", payload);
 }
 
 export async function POST(request: Request, context: { params: Promise<{ token: string }> }) {
@@ -124,11 +138,12 @@ export async function POST(request: Request, context: { params: Promise<{ token:
     return NextResponse.json({ detail: "Choose a time before booking." }, { status: 422 });
   }
 
-  // Only these three fields are forwarded — anything else the client sends,
+  // Only these fields are forwarded — anything else the client sends,
   // including any identifier it may have invented, is discarded here.
-  return forward(token, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ start_at: startAt, booking_key: bookingKey, website }),
+  return forward("booking/confirm", {
+    token,
+    start_at: startAt,
+    booking_key: bookingKey,
+    website,
   });
 }

@@ -353,7 +353,10 @@ function AppointmentHistory({
                       onClick={() => {
                         void onAct(
                           `/appointments/${appointment.id}/disposition`,
-                          { status: "completed" },
+                          {
+                            status: "completed",
+                            expected_revision: appointment.revision,
+                          },
                           "Appointment completed.",
                         );
                       }}
@@ -365,7 +368,10 @@ function AppointmentHistory({
                       onClick={() => {
                         void onAct(
                           `/appointments/${appointment.id}/disposition`,
-                          { status: "no_show" },
+                          {
+                            status: "no_show",
+                            expected_revision: appointment.revision,
+                          },
                           "Appointment marked no-show.",
                         );
                       }}
@@ -377,7 +383,10 @@ function AppointmentHistory({
                       onClick={() => {
                         void onAct(
                           `/appointments/${appointment.id}/disposition`,
-                          { status: "canceled" },
+                          {
+                            status: "canceled",
+                            expected_revision: appointment.revision,
+                          },
                           "Appointment canceled. The customer has been told.",
                         );
                       }}
@@ -439,9 +448,11 @@ function RescheduleForm({
         }
         setValidation(null);
         setSaving(true);
-        void onSubmit({ start_at: startAt, duration_minutes: currentDuration }).finally(() =>
-          setSaving(false),
-        );
+        void onSubmit({
+          start_at: startAt,
+          duration_minutes: currentDuration,
+          expected_revision: appointment.revision,
+        }).finally(() => setSaving(false));
       }}
     >
       <h4>Move this appointment</h4>

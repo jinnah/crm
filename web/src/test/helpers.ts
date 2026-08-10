@@ -6,6 +6,8 @@ export function makeUser(overrides: Partial<SessionUser> = {}): SessionUser {
     id: "11111111-1111-1111-1111-111111111111",
     email: "owner@example.com",
     role: "owner",
+    display_name: "",
+    notification_phone: null,
     is_active: true,
     must_change_password: false,
     last_login_at: null,

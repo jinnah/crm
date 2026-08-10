@@ -7,6 +7,7 @@ const TOKEN = "AbCdEf0123456789_-xyzMANAGEtoken";
 
 beforeEach(() => {
   process.env.CRM_API_URL = "http://api:8000";
+  process.env.INTERNAL_BFF_KEY = "internal-test-key";
 });
 
 afterEach(() => {
@@ -43,7 +44,13 @@ test("reads the appointment through the server with no caching", async () => {
   const fetchMock = stubForward(200, { booking_reference: "APT-1", status: "scheduled" });
   const response = await GET(new Request("http://localhost:3000/x"), context());
   expect(response.status).toBe(200);
-  expect(fetchMock.mock.calls[0][0]).toBe(`http://api:8000/api/v1/public/appointments/${TOKEN}`);
+  // Fixed internal path: the capability travels in the body, never the URL.
+  const [url, init] = fetchMock.mock.calls[0];
+  expect(url).toBe("http://api:8000/api/v1/internal/appointments/info");
+  expect(String(url)).not.toContain(TOKEN);
+  expect(init?.method).toBe("POST");
+  expect(new Headers(init?.headers).get("X-Internal-Key")).toBe("internal-test-key");
+  expect(JSON.parse(String(init?.body))).toEqual({ token: TOKEN });
   expect(response.headers.get("Cache-Control")).toBe("no-store");
 });
 
@@ -64,24 +71,43 @@ test("cancelling forwards the capability and nothing else", async () => {
   );
   expect(response.status).toBe(200);
   const [url, init] = fetchMock.mock.calls[0];
-  expect(url).toBe(`http://api:8000/api/v1/public/appointments/${TOKEN}/cancel`);
-  expect(init?.body).toBeUndefined();
+  expect(url).toBe("http://api:8000/api/v1/internal/appointments/cancel");
+  // The invented ids never travel — only the capability itself.
+  expect(JSON.parse(String(init?.body))).toEqual({ token: TOKEN });
 });
 
-test("rescheduling forwards only the new time and the honeypot", async () => {
+test("rescheduling forwards only the new time, revision and honeypot", async () => {
   const fetchMock = stubForward(200, { status: "scheduled" });
   await POST(
     postRequest({
       action: "reschedule",
       start_at: "2026-08-21T09:00:00Z",
+      expected_revision: 3,
       lead_id: "aaaaaaaa-0000-0000-0000-000000000001",
       status: "completed",
     }),
     context(),
   );
   const [url, init] = fetchMock.mock.calls[0];
-  expect(url).toBe(`http://api:8000/api/v1/public/appointments/${TOKEN}/reschedule`);
-  expect(Object.keys(JSON.parse(String(init?.body))).sort()).toEqual(["start_at", "website"]);
+  expect(url).toBe("http://api:8000/api/v1/internal/appointments/reschedule");
+  const forwarded = JSON.parse(String(init?.body));
+  expect(Object.keys(forwarded).sort()).toEqual([
+    "expected_revision",
+    "start_at",
+    "token",
+    "website",
+  ]);
+  expect(forwarded.expected_revision).toBe(3);
+});
+
+test("rescheduling without the revision the customer saw is refused", async () => {
+  const fetchMock = stubForward(200, { status: "scheduled" });
+  const response = await POST(
+    postRequest({ action: "reschedule", start_at: "2026-08-21T09:00:00Z" }, "203.0.113.56"),
+    context(),
+  );
+  expect(response.status).toBe(422);
+  expect(fetchMock).not.toHaveBeenCalled();
 });
 
 test("rejects an unknown action, a wrong content type and an oversized body", async () => {

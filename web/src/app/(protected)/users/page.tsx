@@ -1,12 +1,12 @@
 "use client";
 
 import { Plus } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useAuth } from "@/components/auth-context";
 import {
+  ActionsMenu,
   Badge,
   Button,
-  ActionsMenu,
   Card,
   ConfirmDialog,
   FormDialog,
@@ -14,7 +14,7 @@ import {
   InlineSuccess,
   PageHeader,
 } from "@/components/ui";
-import { api, errorDetail, type Role, type SessionUser } from "@/lib/api";
+import { api, errorDetail, type Role, type SessionUser, type UserList } from "@/lib/api";
 import { passwordPolicyError } from "@/lib/password";
 import { ROLE_LABELS } from "@/lib/roles";
 
@@ -23,6 +23,8 @@ const ROLE_TONES: Record<Role, "teal" | "blue" | "gray"> = {
   manager: "blue",
   team_member: "gray",
 };
+
+const PAGE_SIZE = 25;
 
 export default function UsersPage() {
   const { user } = useAuth();
@@ -39,13 +41,15 @@ export default function UsersPage() {
 
 function UserManagement({ selfId }: { selfId: string }) {
   const { csrfToken } = useAuth();
-  const [users, setUsers] = useState<SessionUser[] | null>(null);
+  const [data, setData] = useState<UserList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  const [page, setPage] = useState(1);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<SessionUser | null>(null);
   const [resetting, setResetting] = useState<SessionUser | null>(null);
   const [deactivating, setDeactivating] = useState<SessionUser | null>(null);
   const [busy, setBusy] = useState(false);
@@ -53,31 +57,24 @@ function UserManagement({ selfId }: { selfId: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    void api<SessionUser[]>("/users").then((result) => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(PAGE_SIZE) });
+    if (search) params.set("query", search);
+    if (roleFilter) params.set("role", roleFilter);
+    if (statusFilter) params.set("status", statusFilter);
+    void api<UserList>(`/users?${params.toString()}`).then((result) => {
       if (cancelled) return;
       if (!result.ok || result.data === null) {
         setError(errorDetail(result.data, "Unable to load users."));
         return;
       }
-      setUsers(result.data);
+      setData(result.data);
     });
     return () => {
       cancelled = true;
     };
-  }, [reloadNonce]);
+  }, [reloadNonce, search, roleFilter, statusFilter, page]);
 
   const load = useCallback(() => setReloadNonce((value) => value + 1), []);
-
-  const visible = useMemo(() => {
-    if (users === null) return null;
-    return users.filter((target) => {
-      if (search && !target.email.toLowerCase().includes(search.toLowerCase())) return false;
-      if (roleFilter && target.role !== roleFilter) return false;
-      if (statusFilter === "active" && !target.is_active) return false;
-      if (statusFilter === "inactive" && target.is_active) return false;
-      return true;
-    });
-  }, [users, search, roleFilter, statusFilter]);
 
   function feedback(message: string) {
     setError(null);
@@ -88,16 +85,6 @@ function UserManagement({ selfId }: { selfId: string }) {
   function failure(message: string) {
     setNotice(null);
     setError(message);
-  }
-
-  async function changeRole(target: SessionUser, role: Role) {
-    const result = await api(`/users/${target.id}`, {
-      method: "PATCH",
-      csrfToken,
-      body: { role },
-    });
-    if (!result.ok) failure(errorDetail(result.data, "Unable to update the role."));
-    else feedback(`Role updated for ${target.email}.`);
   }
 
   async function setActive(target: SessionUser, active: boolean) {
@@ -113,7 +100,8 @@ function UserManagement({ selfId }: { selfId: string }) {
     else feedback(`${target.email} ${active ? "reactivated" : "deactivated"}.`);
   }
 
-  const showFilters = (users?.length ?? 0) > 5;
+  const totalPages = data === null ? 1 : Math.max(1, Math.ceil(data.total / PAGE_SIZE));
+  const showFilters = (data?.total ?? 0) > 5 || search !== "" || roleFilter !== "" || statusFilter !== "";
 
   return (
     <section>
@@ -138,9 +126,12 @@ function UserManagement({ selfId }: { selfId: string }) {
             <input
               id="user-search"
               type="search"
-              placeholder="Email"
+              placeholder="Email or name"
               value={search}
-              onChange={(event) => setSearch(event.target.value)}
+              onChange={(event) => {
+                setPage(1);
+                setSearch(event.target.value);
+              }}
             />
           </div>
           <div className="form-field">
@@ -148,7 +139,10 @@ function UserManagement({ selfId }: { selfId: string }) {
             <select
               id="user-role-filter"
               value={roleFilter}
-              onChange={(event) => setRoleFilter(event.target.value)}
+              onChange={(event) => {
+                setPage(1);
+                setRoleFilter(event.target.value);
+              }}
             >
               <option value="">All</option>
               {Object.entries(ROLE_LABELS).map(([value, label]) => (
@@ -163,7 +157,10 @@ function UserManagement({ selfId }: { selfId: string }) {
             <select
               id="user-status-filter"
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
+              onChange={(event) => {
+                setPage(1);
+                setStatusFilter(event.target.value);
+              }}
             >
               <option value="">All</option>
               <option value="active">Active</option>
@@ -173,17 +170,21 @@ function UserManagement({ selfId }: { selfId: string }) {
         </div>
       )}
 
-      {visible === null ? (
+      {data === null ? (
         <p className="page-status" role="status">
           Loading users…
         </p>
+      ) : data.items.length === 0 ? (
+        <Card>
+          <p className="card-empty">No users match these filters.</p>
+        </Card>
       ) : (
         <Card flush className="table-card">
           <table className="data-table">
             <caption className="visually-hidden">Existing users</caption>
             <thead>
               <tr>
-                <th scope="col">Email</th>
+                <th scope="col">User</th>
                 <th scope="col">Role</th>
                 <th scope="col">Status</th>
                 <th scope="col">
@@ -192,43 +193,24 @@ function UserManagement({ selfId }: { selfId: string }) {
               </tr>
             </thead>
             <tbody>
-              {visible.map((target) => {
+              {data.items.map((target) => {
                 const isSelf = target.id === selfId;
                 return (
                   <tr key={target.id}>
-                    <td style={{ fontWeight: 600 }}>
-                      {target.email}
-                      {isSelf && (
-                        <span className="cell-secondary" style={{ fontWeight: 400 }}>
-                          {" "}
-                          (you)
-                        </span>
+                    <td>
+                      <span style={{ fontWeight: 600 }}>
+                        {target.display_name || target.email}
+                      </span>
+                      {isSelf && <span className="cell-secondary"> (you)</span>}
+                      {target.display_name !== "" && (
+                        <div className="cell-secondary">{target.email}</div>
+                      )}
+                      {target.notification_phone !== null && (
+                        <div className="cell-secondary">{target.notification_phone}</div>
                       )}
                     </td>
                     <td>
-                      <label htmlFor={`role-${target.id}`} className="visually-hidden">
-                        Role for {target.email}
-                      </label>
-                      <span
-                        style={{ display: "inline-flex", gap: "0.5rem", alignItems: "center" }}
-                      >
-                        <Badge tone={ROLE_TONES[target.role]}>{ROLE_LABELS[target.role]}</Badge>
-                        <select
-                          id={`role-${target.id}`}
-                          value={target.role}
-                          disabled={isSelf}
-                          title={isSelf ? "You cannot change your own role." : undefined}
-                          onChange={(event) =>
-                            void changeRole(target, event.target.value as Role)
-                          }
-                        >
-                          {Object.entries(ROLE_LABELS).map(([value, label]) => (
-                            <option key={value} value={value}>
-                              {label}
-                            </option>
-                          ))}
-                        </select>
-                      </span>
+                      <Badge tone={ROLE_TONES[target.role]}>{ROLE_LABELS[target.role]}</Badge>
                     </td>
                     <td>
                       {target.is_active ? (
@@ -238,9 +220,19 @@ function UserManagement({ selfId }: { selfId: string }) {
                       )}
                     </td>
                     <td style={{ textAlign: "right" }}>
-                      <ActionsMenu label="Actions">
+                      <ActionsMenu label={`Actions for ${target.email}`}>
                         {(close) => (
                           <>
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                close();
+                                setEditing(target);
+                              }}
+                            >
+                              Edit user
+                            </button>
                             <button
                               type="button"
                               role="menuitem"
@@ -293,6 +285,20 @@ function UserManagement({ selfId }: { selfId: string }) {
         </Card>
       )}
 
+      {data !== null && data.total > PAGE_SIZE && (
+        <nav className="pagination" aria-label="User pages">
+          <Button size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+            Previous
+          </Button>
+          <span>
+            Page {page} of {totalPages} · {data.total} users
+          </span>
+          <Button size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)}>
+            Next
+          </Button>
+        </nav>
+      )}
+
       <FormDialog open={creating} title="Create user" onClose={() => setCreating(false)}>
         <CreateUserForm
           csrfToken={csrfToken}
@@ -304,8 +310,26 @@ function UserManagement({ selfId }: { selfId: string }) {
       </FormDialog>
 
       <FormDialog
+        open={editing !== null}
+        title="Edit user"
+        onClose={() => setEditing(null)}
+      >
+        {editing !== null && (
+          <EditUserForm
+            target={editing}
+            isSelf={editing.id === selfId}
+            csrfToken={csrfToken}
+            onDone={(message) => {
+              setEditing(null);
+              feedback(message);
+            }}
+          />
+        )}
+      </FormDialog>
+
+      <FormDialog
         open={resetting !== null}
-        title={`Set a temporary password`}
+        title="Set a temporary password"
         onClose={() => setResetting(null)}
       >
         {resetting !== null && (
@@ -333,6 +357,120 @@ function UserManagement({ selfId }: { selfId: string }) {
         onCancel={() => setDeactivating(null)}
       />
     </section>
+  );
+}
+
+/** Role changes and the optional presentation fields, saved deliberately
+ * from one dialog — never through an unconfirmed inline control. */
+function EditUserForm({
+  target,
+  isSelf,
+  csrfToken,
+  onDone,
+}: {
+  target: SessionUser;
+  isSelf: boolean;
+  csrfToken: string;
+  onDone: (message: string) => void;
+}) {
+  const [role, setRole] = useState<Role>(target.role);
+  const [displayName, setDisplayName] = useState(target.display_name);
+  const [notificationPhone, setNotificationPhone] = useState(target.notification_phone ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [confirmingRole, setConfirmingRole] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+
+  const roleChanged = role !== target.role;
+
+  async function save() {
+    setError(null);
+    setSubmitting(true);
+    const body: Record<string, unknown> = {
+      display_name: displayName,
+      notification_phone: notificationPhone,
+    };
+    if (roleChanged) body.role = role;
+    const result = await api(`/users/${target.id}`, { method: "PATCH", csrfToken, body });
+    setSubmitting(false);
+    setConfirmingRole(false);
+    if (!result.ok) {
+      setError(errorDetail(result.data, "Unable to update the user."));
+      return;
+    }
+    onDone(`${target.email} updated.`);
+  }
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (roleChanged) {
+      // A role is a sensitive permission change: confirm it explicitly.
+      setConfirmingRole(true);
+      return;
+    }
+    void save();
+  }
+
+  return (
+    <form onSubmit={handleSubmit} noValidate>
+      <p className="card-description" style={{ marginBottom: "1rem" }}>
+        {target.email}
+      </p>
+      <div className="form-field">
+        <label htmlFor="edit-role">Role</label>
+        <select
+          id="edit-role"
+          value={role}
+          disabled={isSelf}
+          onChange={(event) => setRole(event.target.value as Role)}
+        >
+          {Object.entries(ROLE_LABELS).map(([value, label]) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {isSelf && <p className="form-help">You cannot change your own role.</p>}
+      </div>
+      <div className="form-field">
+        <label htmlFor="edit-display-name">Display name (optional)</label>
+        <input
+          id="edit-display-name"
+          maxLength={100}
+          value={displayName}
+          onChange={(event) => setDisplayName(event.target.value)}
+        />
+        <p className="form-help">Shown to customers instead of the email address.</p>
+      </div>
+      <div className="form-field">
+        <label htmlFor="edit-notification-phone">Notification phone (optional)</label>
+        <input
+          id="edit-notification-phone"
+          type="tel"
+          value={notificationPhone}
+          onChange={(event) => setNotificationPhone(event.target.value)}
+        />
+        <p className="form-help">
+          International format, for example +15555550123. Used for staff alerts; never shown
+          publicly.
+        </p>
+      </div>
+      {error !== null && <InlineError>{error}</InlineError>}
+      <div className="dialog-actions">
+        <Button type="submit" variant="primary" disabled={submitting}>
+          {submitting ? "Saving…" : "Save changes"}
+        </Button>
+      </div>
+
+      <ConfirmDialog
+        open={confirmingRole}
+        title={`Change ${target.email} to ${ROLE_LABELS[role]}?`}
+        description="Roles decide what this person can see and do across the CRM. The change takes effect immediately."
+        confirmLabel="Change role"
+        busy={submitting}
+        onConfirm={() => void save()}
+        onCancel={() => setConfirmingRole(false)}
+      />
+    </form>
   );
 }
 

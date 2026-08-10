@@ -34,8 +34,18 @@ const LEAD: Lead = {
 };
 
 const USERS: AssignableUser[] = [
-  { id: "11111111-1111-1111-1111-111111111111", email: "owner@example.com", role: "owner" },
-  { id: "22222222-2222-2222-2222-222222222222", email: "tech@example.com", role: "team_member" },
+  {
+    id: "11111111-1111-1111-1111-111111111111",
+    email: "owner@example.com",
+    role: "owner",
+    display_name: "",
+  },
+  {
+    id: "22222222-2222-2222-2222-222222222222",
+    email: "tech@example.com",
+    role: "team_member",
+    display_name: "",
+  },
 ];
 
 const BASICS = {
@@ -61,6 +71,7 @@ function appointment(overrides: Partial<Appointment> = {}): Appointment {
     lead_name: "Pat Customer",
     assigned_to: USERS[1].id,
     assignee_email: "tech@example.com",
+    assignee_name: null,
     subject: "Roof survey",
     notes: "",
     start_at: "2099-08-20T14:00:00Z",
@@ -68,6 +79,7 @@ function appointment(overrides: Partial<Appointment> = {}): Appointment {
     timezone: "UTC",
     status: "scheduled",
     origin: "staff",
+    revision: 1,
     booking_reference: "APT-ABCD1234",
     cancellation_reason: null,
     created_at: "2026-08-09T12:00:00Z",

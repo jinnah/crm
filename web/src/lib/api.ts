@@ -6,6 +6,8 @@ export type SessionUser = {
   id: string;
   email: string;
   role: Role;
+  display_name: string;
+  notification_phone: string | null;
   is_active: boolean;
   must_change_password: boolean;
   last_login_at: string | null;
@@ -121,6 +123,15 @@ export type AttentionAppointment = {
   detail: string | null;
 };
 
+export type AttentionVoiceCall = {
+  id: string;
+  lead_id: string;
+  lead_name: string | null;
+  reason: string;
+  summary: string;
+  occurred_at: string | null;
+};
+
 export type AttentionQueue = {
   overdue: Lead[];
   due_today: Lead[];
@@ -131,6 +142,54 @@ export type AttentionQueue = {
   appointments_upcoming: AttentionAppointment[];
   appointment_messages_failed: AttentionAppointment[];
   appointment_messages_unknown: AttentionAppointment[];
+  voice_calls: AttentionVoiceCall[];
+};
+
+export type UserList = {
+  items: SessionUser[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
+export type VoiceCallRecord = {
+  id: string;
+  call_sid: string;
+  lead_id: string;
+  appointment_id: string | null;
+  caller_phone: string | null;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  call_status: string;
+  disposition: string;
+  caller_name: string;
+  service_requested: string;
+  service_address: string;
+  preferred_callback_window: string;
+  appointment_preference: string;
+  summary: string;
+  urgency: string;
+  requires_human_follow_up: boolean;
+  transfer_outcome: string;
+  disclosure_version: string;
+  consent_result: string;
+  ack_state: string;
+  alert_state: string;
+  recording_sid: string | null;
+  purged_at: string | null;
+  created_at: string;
+};
+
+export type VoiceSettings = {
+  voice_ack_enabled: boolean;
+  voice_ack_template: string;
+  voice_alert_enabled: boolean;
+  voice_alert_template: string;
+  voice_alert_recipients: "business" | "assigned" | "both";
+  voice_default_staff_id: string | null;
+  voice_transcript_retention_enabled: boolean;
+  voice_transcript_retention_days: number;
 };
 
 export type OutboundMessage = {
@@ -176,6 +235,7 @@ export type AssignableUser = {
   id: string;
   email: string;
   role: Role;
+  display_name: string;
 };
 
 export type AppointmentStatus = "scheduled" | "completed" | "canceled" | "no_show";
@@ -186,13 +246,17 @@ export type Appointment = {
   lead_name: string | null;
   assigned_to: string | null;
   assignee_email: string | null;
+  /** Display name for calendars; the email never enters narrow UI blocks. */
+  assignee_name: string | null;
   subject: string;
   notes: string;
   start_at: string;
   end_at: string;
   timezone: string;
   status: AppointmentStatus;
-  origin: "staff" | "customer";
+  origin: "staff" | "customer" | "voice";
+  /** Monotonic schedule revision; every mutation echoes the one it saw. */
+  revision: number;
   booking_reference: string | null;
   cancellation_reason: string | null;
   created_at: string;
@@ -284,6 +348,7 @@ export const LEAD_SOURCES = [
   "manual",
   "web_form",
   "phone_call",
+  "voice_call",
   "sms",
   "whatsapp",
   "facebook",
