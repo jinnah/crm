@@ -1,4 +1,5 @@
 import os
+import tempfile
 from collections.abc import Generator
 
 import pytest
@@ -26,6 +27,13 @@ TEST_INTERNAL_KEY = "test-internal-bff-key-0123456789abcdef"
 os.environ["INTERNAL_BFF_KEY"] = TEST_INTERNAL_KEY
 TEST_VOICE_KEY = "test-voice-api-key-0123456789abcdefgh"
 os.environ["VOICE_API_KEY"] = TEST_VOICE_KEY
+# Documents: isolated temp storage, the dev/test stub scanner, a configured
+# verified sender and the n8n document-email key. Reserved test domain only.
+os.environ["DOCUMENTS_LOCAL_PATH"] = tempfile.mkdtemp(prefix="crm-docs-test-")
+os.environ["SCANNER_BACKEND"] = "stub"
+os.environ["DOCUMENT_EMAIL_FROM_ADDRESS"] = "documents@crm.test"
+TEST_EMAIL_KEY = "test-document-email-key-0123456789ab"
+os.environ["DOCUMENT_EMAIL_API_KEY"] = TEST_EMAIL_KEY
 get_settings.cache_clear()
 
 
@@ -36,6 +44,11 @@ def internal_headers() -> dict[str, str]:
 
 def voice_headers() -> dict[str, str]:
     return {"X-API-Key": TEST_VOICE_KEY}
+
+
+def email_key_headers() -> dict[str, str]:
+    """Headers the n8n document-email workflow would send."""
+    return {"X-API-Key": TEST_EMAIL_KEY}
 
 
 class RecordingMailer:

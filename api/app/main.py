@@ -7,10 +7,13 @@ from app.api.v1.appointments import lead_router as appointment_lead_router
 from app.api.v1.appointments import router as appointments_router
 from app.api.v1.auth import router as auth_router
 from app.api.v1.custom_fields import router as custom_fields_router
+from app.api.v1.customer_documents import inbound_router as document_email_router
+from app.api.v1.customer_documents import internal_router as internal_documents_router
 from app.api.v1.deps import CSRF_HEADER
 from app.api.v1.health import router as health_router
 from app.api.v1.inbound import MAX_BODY_BYTES
 from app.api.v1.inbound import router as inbound_router
+from app.api.v1.jobs import router as jobs_router
 from app.api.v1.leads import router as leads_router
 from app.api.v1.public_booking import router as internal_capability_router
 from app.api.v1.settings import public_router as public_router
@@ -20,13 +23,18 @@ from app.api.v1.voice import router as voice_router
 from app.config import get_settings, validate_production_settings
 from app.middleware import BodyLimitMiddleware
 from app.services.branding import MAX_UPLOAD_BYTES as MAX_LOGO_BYTES
+from app.services.documents import MAX_UPLOAD_BYTES as MAX_DOCUMENT_BYTES
 from app.services.mailer import SmtpMailer
 from app.services.messaging import N8nSmsSender
 from app.services.rate_limit import (
     default_branding_limiter,
+    default_document_download_limiter,
+    default_document_upload_limiter,
     default_login_limiter,
     default_recovery_limiter,
 )
+from app.services.scanner import build_scanner
+from app.services.storage import build_storage
 
 
 def create_app() -> FastAPI:
@@ -60,12 +68,24 @@ def create_app() -> FastAPI:
     app.add_middleware(
         BodyLimitMiddleware, max_bytes=16 * 1024, path_prefixes=("/api/v1/internal",)
     )
+    # Job routes include multipart document uploads; the ceiling is the
+    # documented per-file limit plus multipart overhead, counted on received
+    # bytes while the request is still streaming.
+    app.add_middleware(
+        BodyLimitMiddleware,
+        max_bytes=MAX_DOCUMENT_BYTES + 64 * 1024,
+        path_prefixes=("/api/v1/jobs",),
+    )
 
     app.state.login_limiter = default_login_limiter()
     app.state.recovery_limiter = default_recovery_limiter()
     app.state.branding_limiter = default_branding_limiter()
+    app.state.document_upload_limiter = default_document_upload_limiter()
+    app.state.document_download_limiter = default_document_download_limiter()
     app.state.mailer = SmtpMailer(settings)
     app.state.sms_sender = N8nSmsSender(settings)
+    app.state.document_storage = build_storage(settings)
+    app.state.document_scanner = build_scanner(settings)
 
     @app.middleware("http")
     async def no_store_sensitive_responses(
@@ -91,6 +111,9 @@ def create_app() -> FastAPI:
     app.include_router(appointment_lead_router, prefix="/api/v1")
     app.include_router(internal_capability_router, prefix="/api/v1")
     app.include_router(voice_router, prefix="/api/v1")
+    app.include_router(jobs_router, prefix="/api/v1")
+    app.include_router(internal_documents_router, prefix="/api/v1")
+    app.include_router(document_email_router, prefix="/api/v1")
     return app
 
 

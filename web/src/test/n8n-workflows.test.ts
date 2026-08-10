@@ -402,6 +402,7 @@ describe("workflow hygiene", () => {
   test("covers every expected workflow", () => {
     expect(files.sort()).toEqual([
       "appointment-reminders.json",
+      "document-email.json",
       "error-handler.json",
       "meta-messenger.json",
       "meta-whatsapp.json",
@@ -1096,3 +1097,137 @@ describe("voice transcript cleanup", () => {
   });
 });
 
+
+describe("document-email workflow", () => {
+  const workflow = loadWorkflow("document-email.json");
+  const EMAIL_ENV = {
+    ...ENV,
+    CRM_DOCUMENT_EMAIL_KEY: "test-document-email-key-not-real",
+  };
+
+  function claimResponse(body: unknown, statusCode = 200): Item {
+    return { json: { statusCode, body } };
+  }
+
+  test("unpacking uses only CRM-snapshotted fields and pins the sender", () => {
+    const items = runCodeNode(
+      workflow,
+      "Unpack Claims",
+      [
+        claimResponse([
+          {
+            id: "11111111-0000-0000-0000-000000000001",
+            recipient: "pat@customer.test",
+            from_name: "Acme Roofing",
+            from_address: "documents@crm.test",
+            reply_to: "office@crm.test",
+            subject: "Your quote Q-2026-0001",
+            body_text: "Hi Pat",
+            body_html: "<p>Hi Pat</p>",
+            attach_pdf: true,
+            pdf_filename: "Q-2026-0001.pdf",
+            // A malicious/buggy payload trying to smuggle another sender is
+            // simply never read by the unpack code:
+            fromEmail: "attacker@evil.test",
+            sender: "attacker@evil.test",
+          },
+          {
+            id: "11111111-0000-0000-0000-000000000002",
+            recipient: "sam@customer.test",
+            from_address: "documents@crm.test",
+            subject: "Invoice INV-2026-0001",
+            body_text: "Hello",
+            attach_pdf: false,
+          },
+        ]),
+      ],
+      EMAIL_ENV,
+    );
+    expect(items).toHaveLength(2);
+    expect(items[0].json).toMatchObject({
+      outcome: "send_attach",
+      from_address: "documents@crm.test",
+      pdf_filename: "Q-2026-0001.pdf",
+    });
+    expect(items[1].json.outcome).toBe("send_link");
+    expect(JSON.stringify(items)).not.toContain("attacker@evil.test");
+  });
+
+  test("a failed claim gives up until the next run without side effects", () => {
+    const items = runCodeNode(
+      workflow,
+      "Unpack Claims",
+      [claimResponse({ detail: "nope" }, 503)],
+      EMAIL_ENV,
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0].json.outcome).toBe("claim_failed");
+  });
+
+  test("send classification: submitted, pre-submission retry, permanent, ambiguous", () => {
+    const base = { delivery_id: "d-1" };
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ ...base, messageId: "<abc@mail>" }, "submitted"],
+      [{ ...base, error: "connect ECONNREFUSED 10.0.0.9:587" }, "leave"],
+      [{ ...base, error: "Invalid login: authentication failed" }, "leave"],
+      [{ ...base, error: "Message rejected: 550 mailbox unavailable" }, "failed"],
+      [{ ...base, error: "socket hang up mid-transfer" }, "unknown"],
+    ];
+    for (const [json, expected] of cases) {
+      const [result] = runCodeNode(workflow, "Classify Send", [{ json }], EMAIL_ENV);
+      expect(result.json.outcome, JSON.stringify(json)).toBe(expected);
+      expect(result.json.delivery_id).toBe("d-1");
+    }
+  });
+
+  test("classification output never carries bodies, subjects or addresses", () => {
+    const [result] = runCodeNode(
+      workflow,
+      "Classify Send",
+      [
+        {
+          json: {
+            delivery_id: "d-2",
+            recipient: "secret-person@customer.test",
+            subject: "Private subject line",
+            body_text: "Private body",
+            error: "socket hang up",
+          },
+        },
+      ],
+      EMAIL_ENV,
+    );
+    const serialized = JSON.stringify(result.json);
+    expect(serialized).not.toContain("secret-person");
+    expect(serialized).not.toContain("Private subject");
+    expect(serialized).not.toContain("Private body");
+  });
+
+  test("retry policy: only pre-submission failures are left for the lease retry", () => {
+    // "leave" items are the ONLY path back to pending (via the CRM lease);
+    // ambiguous outcomes must be reported unknown and never retried.
+    const [ambiguous] = runCodeNode(
+      workflow,
+      "Classify Send",
+      [{ json: { delivery_id: "d-3", error: "TLS renegotiation failed late" } }],
+      EMAIL_ENV,
+    );
+    expect(ambiguous.json.outcome).toBe("unknown");
+  });
+
+  test("the run summary is bounded counts only", () => {
+    const [summary] = runCodeNode(
+      workflow,
+      "Summarize Run",
+      [
+        { json: { outcome: "submitted", recipient: "leak@customer.test" } },
+        { json: { outcome: "submitted" } },
+        { json: { outcome: "failed" } },
+      ],
+      EMAIL_ENV,
+    );
+    expect(summary.json.outcome).toBe("run_complete");
+    expect(summary.json.counts).toMatchObject({ submitted: 2, failed: 1 });
+    expect(JSON.stringify(summary.json)).not.toContain("leak@customer.test");
+  });
+});

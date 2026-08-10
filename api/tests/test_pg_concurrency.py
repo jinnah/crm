@@ -1061,3 +1061,339 @@ def test_concurrent_duplicate_callsid_produces_one_record(pg_session_factory) ->
     )
     assert check.scalar(func.count(Lead.id)) == 1
     check.close()
+
+
+# --- jobs, commercial documents, payments and email ----------------------
+
+
+def _commercial_setup(pg_session_factory):
+    """Owner, customer, job and the settings row, committed and ready."""
+    import tempfile
+
+    from app.models import Job, Lead
+    from app.services.messaging import get_settings_row
+    from app.services.numbering import allocate_number
+    from app.services.storage import LocalDiskStorage
+
+    session = pg_session_factory()
+    owner = make_owner(session, "commercial-owner@example.com")
+    get_settings_row(session)
+    lead = Lead(name="Concurrent Customer", email="concurrent@example.com", source="manual")
+    session.add(lead)
+    session.commit()
+    job = Job(job_number=allocate_number(session, "job", "J"), lead_id=lead.id)
+    session.add(job)
+    session.commit()
+    storage = LocalDiskStorage(tempfile.mkdtemp(prefix="crm-pg-docs-"))
+    return session, owner, lead, job, storage
+
+
+def _issued_quote(session, owner, job, storage):
+    from app.config import get_settings
+    from app.services import commercial
+    from app.services.messaging import get_settings_row
+
+    quote = commercial.create_draft(session, owner, job, get_settings_row(session), kind="quote")
+    commercial.replace_lines(
+        session,
+        quote,
+        [{"description": "Work", "quantity_milli": 1000, "unit_price_minor": 10000}],
+        discount_bp=0,
+        customer_notes="",
+        terms="",
+    )
+    commercial.issue(session, owner, storage, quote, get_settings_row(session), get_settings())
+    session.commit()
+    return quote
+
+
+def test_concurrent_number_allocation_is_unique(pg_session_factory) -> None:
+    from app.models import NumberSequence
+    from app.services.numbering import allocate_number
+
+    setup = pg_session_factory()
+    setup.close()
+
+    barrier = threading.Barrier(4)
+    numbers: list[str] = []
+    errors: list[Exception] = []
+
+    def allocate() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            value = allocate_number(session, "invoice", "INV")
+            session.commit()
+            numbers.append(value)
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=allocate) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert len(numbers) == 4
+    assert len(set(numbers)) == 4, "every allocation must be unique"
+    suffixes = sorted(int(number.rsplit("-", 1)[1]) for number in numbers)
+    assert suffixes == [1, 2, 3, 4]
+
+    check = pg_session_factory()
+    row = check.scalar(select(NumberSequence).where(NumberSequence.kind == "invoice"))
+    assert row is not None and row.last_value == 4
+    check.close()
+
+
+def test_concurrent_accept_versus_decline_has_one_winner(pg_session_factory) -> None:
+    from app.models import CommercialDocument, CommercialDocumentVersion
+    from app.services import commercial
+    from app.services.commercial import CommercialError
+
+    session, owner, _lead, job, storage = _commercial_setup(pg_session_factory)
+    quote = _issued_quote(session, owner, job, storage)
+    quote_id = quote.id
+    session.close()
+
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+    refusals: list[Exception] = []
+
+    def respond(accept: bool) -> None:
+        worker = pg_session_factory()
+        try:
+            version = worker.scalar(
+                select(CommercialDocumentVersion).where(
+                    CommercialDocumentVersion.document_id == quote_id,
+                    CommercialDocumentVersion.superseded_at.is_(None),
+                )
+            )
+            barrier.wait(timeout=5)
+            document = commercial.respond_to_quote(
+                worker, quote_id, version, accept=accept, typed_name="Race Customer"
+            )
+            worker.commit()
+            outcomes.append(document.status)
+        except CommercialError as error:
+            refusals.append(error)
+            worker.rollback()
+        except Exception as error:  # noqa: BLE001
+            refusals.append(error)
+            worker.rollback()
+        finally:
+            worker.close()
+
+    threads = [
+        threading.Thread(target=respond, args=(True,)),
+        threading.Thread(target=respond, args=(False,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    # Exactly one deterministic winner; the loser got a controlled refusal.
+    assert len(outcomes) == 1, (outcomes, refusals)
+    assert len(refusals) == 1
+    assert all(isinstance(error, CommercialError) for error in refusals)
+
+    check = pg_session_factory()
+    final = check.get(CommercialDocument, quote_id)
+    assert final.status == outcomes[0]
+    assert final.responded_at is not None
+    check.close()
+
+
+def test_concurrent_payments_cannot_exceed_invoice_balance(pg_session_factory) -> None:
+    from sqlalchemy import func
+
+    from app.config import get_settings
+    from app.models import CommercialDocument, Payment, utcnow
+    from app.services import commercial
+    from app.services.commercial import CommercialError
+    from app.services.messaging import get_settings_row
+
+    session, owner, _lead, job, storage = _commercial_setup(pg_session_factory)
+    invoice = commercial.create_draft(
+        session, owner, job, get_settings_row(session), kind="invoice"
+    )
+    commercial.replace_lines(
+        session,
+        invoice,
+        [{"description": "Work", "quantity_milli": 1000, "unit_price_minor": 10000}],
+        discount_bp=0,
+        customer_notes="",
+        terms="",
+    )
+    commercial.issue(session, owner, storage, invoice, get_settings_row(session), get_settings())
+    session.commit()
+    invoice_id = invoice.id
+    owner_id = owner.id
+    session.close()
+
+    barrier = threading.Barrier(2)
+    successes: list[str] = []
+    refusals: list[Exception] = []
+
+    def pay(key: str) -> None:
+        worker = pg_session_factory()
+        try:
+            from app.models import User as UserModel
+
+            acting = worker.get(UserModel, owner_id)
+            barrier.wait(timeout=5)
+            payment, _receipt = commercial.record_payment(
+                worker,
+                acting,
+                storage,
+                invoice_id,
+                get_settings_row(worker),
+                get_settings(),
+                amount_minor=8000,  # two of these exceed the 10000 total
+                currency="USD",
+                method="cash",
+                paid_on=utcnow(),
+                idempotency_key=key,
+            )
+            worker.commit()
+            successes.append(str(payment.id))
+        except CommercialError as error:
+            refusals.append(error)
+            worker.rollback()
+        finally:
+            worker.close()
+
+    threads = [
+        threading.Thread(target=pay, args=("race-pay-A",)),
+        threading.Thread(target=pay, args=("race-pay-B",)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert len(successes) == 1, (successes, refusals)
+    assert len(refusals) == 1
+
+    check = pg_session_factory()
+    final = check.get(CommercialDocument, invoice_id)
+    assert final.amount_paid_minor == 8000
+    assert check.scalar(select(func.count()).select_from(Payment)) == 1
+    check.close()
+
+
+def test_concurrent_quote_conversion_creates_one_invoice(pg_session_factory) -> None:
+    from sqlalchemy import func
+
+    from app.config import get_settings
+    from app.models import CommercialDocument, CommercialDocumentVersion
+    from app.services import commercial
+    from app.services.messaging import get_settings_row
+
+    session, owner, _lead, job, storage = _commercial_setup(pg_session_factory)
+    quote = _issued_quote(session, owner, job, storage)
+    version = session.scalar(
+        select(CommercialDocumentVersion).where(CommercialDocumentVersion.document_id == quote.id)
+    )
+    commercial.respond_to_quote(session, quote.id, version, accept=True, typed_name="Race Customer")
+    session.commit()
+    quote_id = quote.id
+    owner_id = owner.id
+    session.close()
+
+    barrier = threading.Barrier(2)
+    invoice_ids: list[str] = []
+    errors: list[Exception] = []
+
+    def convert() -> None:
+        worker = pg_session_factory()
+        try:
+            from app.models import User as UserModel
+
+            acting = worker.get(UserModel, owner_id)
+            fresh_quote = worker.get(CommercialDocument, quote_id)
+            barrier.wait(timeout=5)
+            invoice = commercial.convert_quote_to_invoice(
+                worker, acting, storage, fresh_quote, get_settings_row(worker), get_settings()
+            )
+            worker.commit()
+            invoice_ids.append(str(invoice.id))
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+            worker.rollback()
+        finally:
+            worker.close()
+
+    threads = [threading.Thread(target=convert) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert len(set(invoice_ids)) == 1, "both conversions must resolve to one invoice"
+
+    check = pg_session_factory()
+    count = check.scalar(
+        select(func.count())
+        .select_from(CommercialDocument)
+        .where(CommercialDocument.kind == "invoice")
+    )
+    assert count == 1
+    check.close()
+
+
+def test_concurrent_email_claims_divide_work_without_overlap(pg_session_factory) -> None:
+    from app.config import get_settings
+    from app.services import commercial, document_access, document_email
+    from app.services.messaging import get_settings_row
+
+    session, owner, _lead, job, storage = _commercial_setup(pg_session_factory)
+    quote = _issued_quote(session, owner, job, storage)
+    version = commercial.active_version(session, quote)
+    settings = get_settings()
+    settings_row = get_settings_row(session)
+    for index in range(4):
+        capability, _raw = document_access.issue_capability(
+            session, settings, settings_row, version.id, purpose="view"
+        )
+        document_email.create_delivery(
+            session,
+            owner,
+            settings,
+            settings_row,
+            version=version,
+            recipient=f"race-{index}@customer.test",
+            secure_link="https://crm.test/document/x",
+            capability_id=capability.id,
+            send_key=f"race-send-{index}",
+        )
+    session.commit()
+    session.close()
+
+    barrier = threading.Barrier(2)
+    claims: list[set[str]] = []
+
+    def claim() -> None:
+        worker = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            rows = document_email.claim_pending(worker, limit=10)
+            worker.commit()
+            claims.append({str(row.id) for row in rows})
+        finally:
+            worker.close()
+
+    threads = [threading.Thread(target=claim) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert len(claims) == 2
+    assert not (claims[0] & claims[1]), "no delivery may be claimed twice"
+    assert len(claims[0] | claims[1]) == 4, "every delivery is claimed exactly once"

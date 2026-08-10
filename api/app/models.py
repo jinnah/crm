@@ -58,6 +58,19 @@ ACTIVITY_TYPES = (
     "booking_link_created",
     "booking_link_revoked",
     "voice_call",
+    "job_created",
+    "job_status_change",
+    "job_archived",
+    "job_restored",
+    "document_uploaded",
+    "document_moved",
+    "document_deleted",
+    "commercial_issued",
+    "commercial_voided",
+    "quote_response",
+    "payment_recorded",
+    "payment_reversed",
+    "document_email",
 )
 
 # Outbound message purposes and delivery states.
@@ -80,6 +93,42 @@ VOICE_ALERT_RECIPIENTS = ("business", "assigned", "both")
 # Appointment notification kinds and their durable delivery state.
 NOTIFICATION_TYPES = ("confirmation", "reminder", "rescheduled", "canceled")
 NOTIFICATION_STATES = ("pending", "claimed", "sent", "failed", "unknown", "suppressed")
+
+# Job lifecycle. Transitions are enforced centrally in services/jobs.py; the
+# UI never invents its own rules. Jobs are archived, never hard-deleted.
+JOB_STATUSES = ("new", "quoted", "approved", "scheduled", "in_progress", "completed", "canceled")
+
+# Uploaded-paperwork categories (bounded; "other" is the catch-all).
+JOB_DOCUMENT_CATEGORIES = (
+    "receipt",
+    "quote",
+    "invoice",
+    "contract",
+    "permit",
+    "warranty",
+    "photo",
+    "other",
+)
+
+# Upload pipeline state. A file is inaccessible until scanning succeeds.
+SCAN_STATES = ("pending", "clean", "infected", "failed")
+
+# Commercial documents and their centrally enforced lifecycles.
+COMMERCIAL_KINDS = ("quote", "invoice", "receipt")
+QUOTE_STATUSES = ("draft", "sent", "viewed", "accepted", "declined", "expired", "voided")
+INVOICE_STATUSES = ("draft", "sent", "viewed", "partially_paid", "paid", "overdue", "voided")
+RECEIPT_STATUSES = ("issued", "voided")
+
+PAYMENT_METHODS = ("cash", "check", "bank_transfer", "card_external", "other")
+
+# Customer capability purposes for document access.
+CAPABILITY_PURPOSES = ("view", "quote_response")
+
+# Transactional document email: purposes and durable delivery states.
+# "submitted" means the provider accepted the message; "delivered" is only
+# ever set from a trusted provider callback, never from submission alone.
+EMAIL_PURPOSES = ("quote", "invoice", "receipt", "job_document")
+EMAIL_STATES = ("pending", "claimed", "submitted", "delivered", "failed", "unknown", "suppressed")
 
 
 def utcnow() -> datetime:
@@ -404,6 +453,58 @@ class CommunicationSettings(Base):
     voice_transcript_retention_enabled: Mapped[bool] = mapped_column(default=False)
     voice_transcript_retention_days: Mapped[int] = mapped_column(Integer, default=30)
 
+    # --- Documents & email ----------------------------------------------
+    # Customer-facing document configuration. The verified From ADDRESS is
+    # deployment configuration (environment), shown read-only — it is not a
+    # row here so no user or API caller can change it.
+    default_currency: Mapped[str] = mapped_column(String(3), default="USD")
+    quote_number_prefix: Mapped[str] = mapped_column(String(8), default="Q")
+    invoice_number_prefix: Mapped[str] = mapped_column(String(8), default="INV")
+    receipt_number_prefix: Mapped[str] = mapped_column(String(8), default="R")
+    default_quote_valid_days: Mapped[int] = mapped_column(Integer, default=30)
+    default_invoice_due_days: Mapped[int] = mapped_column(Integer, default=14)
+    default_tax_rate_bp: Mapped[int] = mapped_column(Integer, default=0)
+    business_email: Mapped[str] = mapped_column(String(320), default="")
+    business_phone: Mapped[str] = mapped_column(String(32), default="")
+    business_address: Mapped[str] = mapped_column(String(500), default="")
+    business_registration_id: Mapped[str] = mapped_column(String(100), default="")
+    email_from_display_name: Mapped[str] = mapped_column(String(200), default="")
+    email_reply_to: Mapped[str] = mapped_column(String(320), default="")
+    quote_email_subject: Mapped[str] = mapped_column(
+        String(300), default="Your quote {{document_number}} from {{business_name}}"
+    )
+    quote_email_body: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Hi {{customer_name}},\n\nYour quote {{document_number}} for job {{job_number}} "
+            "is ready: {{document_total}}.\n\nView and respond here: {{secure_document_link}}\n\n"
+            "{{business_name}}"
+        ),
+    )
+    invoice_email_subject: Mapped[str] = mapped_column(
+        String(300), default="Invoice {{document_number}} from {{business_name}}"
+    )
+    invoice_email_body: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Hi {{customer_name}},\n\nInvoice {{document_number}} for job {{job_number}} "
+            "is due {{due_date}}: {{document_total}}.\n\nView it here: "
+            "{{secure_document_link}}\n\n{{business_name}}"
+        ),
+    )
+    receipt_email_subject: Mapped[str] = mapped_column(
+        String(300), default="Receipt {{document_number}} from {{business_name}}"
+    )
+    receipt_email_body: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Hi {{customer_name}},\n\nThank you. Your receipt {{document_number}} for "
+            "{{document_total}} is here: {{secure_document_link}}\n\n{{business_name}}"
+        ),
+    )
+    secure_link_expiry_days: Mapped[int] = mapped_column(Integer, default=30)
+    email_attach_pdf_default: Mapped[bool] = mapped_column(default=True)
+
     # --- Branding -------------------------------------------------------
     # The logo is small, single-tenant and changes rarely, so it lives in the
     # database rather than pulling in an object store. What is stored is the
@@ -484,6 +585,11 @@ class Appointment(Base):
     # hard-deleted, so a lead deletion that would erase history is refused.
     lead_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("leads.id", ondelete="RESTRICT"), index=True
+    )
+    # Optional job association. Existing appointments stay unlinked until a
+    # staff member assigns them deliberately; RESTRICT keeps job history safe.
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), index=True
     )
     assigned_to: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
@@ -695,3 +801,427 @@ class InboundEvent(Base):
     )
     lead_created: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class NumberSequence(Base):
+    """Concurrency-safe yearly counters for human-readable numbers.
+
+    Allocation takes a row lock (FOR UPDATE) on the (kind, year) row, so two
+    concurrent issuances can never mint the same number. Gaps caused by a
+    rolled-back transaction are acceptable and documented; reuse is not.
+    """
+
+    __tablename__ = "number_sequences"
+    __table_args__ = (UniqueConstraint("kind", "year", name="uq_number_sequences"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(16))  # job | quote | invoice | receipt
+    year: Mapped[int] = mapped_column(Integer)
+    last_value: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class Job(Base):
+    """One piece of work for one customer. A customer (lead) may have many
+    jobs; every document and commercial record belongs to exactly one job, so
+    the customer relationship is always derived job → lead and can never
+    disagree with a separately stored customer id.
+
+    Jobs are archived, never hard-deleted; jobs with documents, issued
+    commercial records, payments or appointments are protected by RESTRICT
+    foreign keys on those tables.
+    """
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('new', 'quoted', 'approved', 'scheduled', 'in_progress', "
+            "'completed', 'canceled')",
+            name="ck_jobs_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # Human-readable, immutable, concurrency-safe (allocated via NumberSequence).
+    job_number: Mapped[str] = mapped_column(String(24), unique=True)
+    # RESTRICT: a customer with jobs is archived, never erased.
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="RESTRICT"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), default="")
+    service_type: Mapped[str] = mapped_column(String(200), default="")
+    service_address: Mapped[str] = mapped_column(String(300), default="")
+    status: Mapped[str] = mapped_column(String(16), default="new")
+    assigned_to: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True
+    )
+    scheduled_for: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    internal_notes: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    lead: Mapped["Lead"] = relationship()
+    assignee: Mapped["User | None"] = relationship(foreign_keys=[assigned_to])
+
+
+class JobDocument(Base):
+    """One uploaded piece of paperwork, always belonging to a job.
+
+    The binary lives in object storage under `storage_key`; PostgreSQL holds
+    metadata, relationships, hashes and audit state only. A file stays in
+    quarantine (inaccessible) until content validation and malware scanning
+    both succeed. Deleted uploads keep this row as an audit tombstone with the
+    stored object removed.
+    """
+
+    __tablename__ = "job_documents"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('receipt', 'quote', 'invoice', 'contract', 'permit', "
+            "'warranty', 'photo', 'other')",
+            name="ck_job_documents_category",
+        ),
+        CheckConstraint(
+            "scan_state IN ('pending', 'clean', 'infected', 'failed')",
+            name="ck_job_documents_scan_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # RESTRICT: document history must survive; jobs are archived, not deleted.
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), default="")
+    category: Mapped[str] = mapped_column(String(16), default="other")
+    description: Mapped[str] = mapped_column(String(1000), default="")
+    # Sanitized display filename — never a path, never trusted content.
+    original_filename: Mapped[str] = mapped_column(String(200), default="")
+    content_type: Mapped[str] = mapped_column(String(64))
+    byte_size: Mapped[int] = mapped_column(Integer)
+    sha256: Mapped[str] = mapped_column(String(64))
+    # Object-storage keys. The quarantine key is set on upload; the permanent
+    # key only after validation and scanning succeed. Keys grant no authority.
+    storage_key: Mapped[str | None] = mapped_column(String(300))
+    quarantine_key: Mapped[str | None] = mapped_column(String(300))
+    # Server-generated normalized preview image (images only), safe to inline.
+    preview_storage_key: Mapped[str | None] = mapped_column(String(300))
+    scan_state: Mapped[str] = mapped_column(String(16), default="pending")
+    scan_detail: Mapped[str | None] = mapped_column(String(300))
+    scanned_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    archived_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Audit tombstone for deleted uploads: the row survives, the object is gone.
+    deleted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    deleted_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    delete_reason: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    job: Mapped["Job"] = relationship()
+
+
+class CommercialDocument(Base):
+    """A quote, invoice or receipt for a job.
+
+    Money is integer minor units in `currency` — never floating point. Drafts
+    are editable; issuing snapshots the document into an immutable
+    CommercialDocumentVersion (with the exact PDF), assigns the final number,
+    and later corrections create new versions or void-and-reissue — history is
+    never rewritten. Never hard-deleted.
+    """
+
+    __tablename__ = "commercial_documents"
+    __table_args__ = (
+        UniqueConstraint("kind", "number", name="uq_commercial_documents_number"),
+        CheckConstraint(
+            "kind IN ('quote', 'invoice', 'receipt')", name="ck_commercial_documents_kind"
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'sent', 'viewed', 'accepted', 'declined', 'expired', "
+            "'voided', 'partially_paid', 'paid', 'overdue', 'issued')",
+            name="ck_commercial_documents_status",
+        ),
+        CheckConstraint("subtotal_minor >= 0", name="ck_commercial_documents_subtotal"),
+        CheckConstraint("total_minor >= 0", name="ck_commercial_documents_total"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    kind: Mapped[str] = mapped_column(String(8))
+    # RESTRICT: commercial history must survive its job.
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    # NULL until issuance; then immutable and unique per kind.
+    number: Mapped[str | None] = mapped_column(String(24))
+    currency: Mapped[str] = mapped_column(String(3), default="USD")
+    # Document-level discount in basis points (0–10000), applied to the
+    # subtotal; see services/commercial.py for the documented rounding rules.
+    discount_bp: Mapped[int] = mapped_column(Integer, default=0)
+    subtotal_minor: Mapped[int] = mapped_column(Integer, default=0)
+    discount_total_minor: Mapped[int] = mapped_column(Integer, default=0)
+    tax_total_minor: Mapped[int] = mapped_column(Integer, default=0)
+    total_minor: Mapped[int] = mapped_column(Integer, default=0)
+    customer_notes: Mapped[str] = mapped_column(Text, default="")
+    terms: Mapped[str] = mapped_column(Text, default="")
+    # Quote validity / invoice dates (business-timezone calendar dates).
+    valid_until: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    issued_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    due_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    # Current active issued version number (versions are immutable rows).
+    current_version: Mapped[int] = mapped_column(Integer, default=0)
+    # Quote response — recorded once, idempotently, with the snapshot hash the
+    # customer actually saw.
+    responded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    response_name: Mapped[str | None] = mapped_column(String(200))
+    response_snapshot_sha256: Mapped[str | None] = mapped_column(String(64))
+    # Idempotent quote→invoice conversion: set once under the document lock.
+    source_quote_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("commercial_documents.id", ondelete="SET NULL")
+    )
+    source_quote_version: Mapped[int | None] = mapped_column(Integer)
+    converted_invoice_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("commercial_documents.id", ondelete="SET NULL")
+    )
+    # Receipts: the payment they certify. use_alter breaks the FK cycle with
+    # payments (which reference commercial_documents) at create_all time; the
+    # explicit name lets ALTER emit and drop it deterministically.
+    payment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey(
+            "payments.id",
+            ondelete="RESTRICT",
+            use_alter=True,
+            name="fk_commercial_documents_payment_id",
+        )
+    )
+    amount_paid_minor: Mapped[int] = mapped_column(Integer, default=0)
+    voided_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    voided_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    void_reason: Mapped[str | None] = mapped_column(String(300))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    job: Mapped["Job"] = relationship()
+
+
+class CommercialLineItem(Base):
+    """One draft line. Issued snapshots copy lines into the immutable version
+    payload; these rows always describe the current draft state only."""
+
+    __tablename__ = "commercial_line_items"
+    __table_args__ = (
+        CheckConstraint("quantity_milli > 0", name="ck_commercial_line_items_quantity"),
+        CheckConstraint("unit_price_minor >= 0", name="ck_commercial_line_items_unit_price"),
+        CheckConstraint(
+            "discount_bp >= 0 AND discount_bp <= 10000", name="ck_commercial_line_items_discount"
+        ),
+        CheckConstraint(
+            "tax_rate_bp >= 0 AND tax_rate_bp <= 5000", name="ck_commercial_line_items_tax"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("commercial_documents.id", ondelete="CASCADE"), index=True
+    )
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    description: Mapped[str] = mapped_column(String(500))
+    # Quantity in thousandths (2.5 hours = 2500); money in integer minor units.
+    quantity_milli: Mapped[int] = mapped_column(Integer, default=1000)
+    unit: Mapped[str] = mapped_column(String(20), default="")
+    unit_price_minor: Mapped[int] = mapped_column(Integer, default=0)
+    discount_bp: Mapped[int] = mapped_column(Integer, default=0)
+    tax_rate_bp: Mapped[int] = mapped_column(Integer, default=0)
+    line_total_minor: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class CommercialDocumentVersion(Base):
+    """The immutable snapshot of one issued document version.
+
+    `payload` holds everything needed to reproduce the document (parties,
+    lines, totals, dates, notes); `pdf_storage_key`/`pdf_sha256` reference the
+    exact bytes the customer received. Never edited, never deleted.
+    """
+
+    __tablename__ = "commercial_document_versions"
+    __table_args__ = (
+        UniqueConstraint("document_id", "version", name="uq_commercial_document_versions"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("commercial_documents.id", ondelete="RESTRICT"), index=True
+    )
+    version: Mapped[int] = mapped_column(Integer)
+    number: Mapped[str] = mapped_column(String(24))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    pdf_storage_key: Mapped[str] = mapped_column(String(300))
+    pdf_sha256: Mapped[str] = mapped_column(String(64))
+    pdf_byte_size: Mapped[int] = mapped_column(Integer)
+    superseded_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+    document: Mapped["CommercialDocument"] = relationship()
+
+
+class Payment(Base):
+    """A manually recorded, externally completed payment against an invoice.
+
+    Posted payments are never edited in place: corrections are audited
+    reversals. No field ever stores card numbers, CVV or bank credentials —
+    reference/note inputs are validated against likely PAN/CVV content.
+    """
+
+    __tablename__ = "payments"
+    __table_args__ = (
+        CheckConstraint("amount_minor > 0", name="ck_payments_amount"),
+        CheckConstraint(
+            "method IN ('cash', 'check', 'bank_transfer', 'card_external', 'other')",
+            name="ck_payments_method",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # RESTRICT: payment history must survive its invoice.
+    invoice_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("commercial_documents.id", ondelete="RESTRICT"), index=True
+    )
+    amount_minor: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str] = mapped_column(String(3))
+    method: Mapped[str] = mapped_column(String(16))
+    paid_on: Mapped[datetime] = mapped_column(UTCDateTime)
+    reference: Mapped[str] = mapped_column(String(100), default="")
+    internal_note: Mapped[str] = mapped_column(String(500), default="")
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    recorded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # The receipt issued for this payment (a CommercialDocument of kind receipt).
+    receipt_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("commercial_documents.id", ondelete="SET NULL")
+    )
+    voided_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    voided_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    void_reason: Mapped[str | None] = mapped_column(String(300))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
+class DocumentCapability(Base):
+    """Expiring, revocable customer access to ONE immutable document version.
+
+    Only the keyed digest is stored; the raw capability exists in the link
+    alone and travels in request bodies, never URLs the API logs. A capability
+    grants exactly the referenced version plus, for quotes, the response
+    action — nothing else.
+    """
+
+    __tablename__ = "document_capabilities"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('view', 'quote_response')", name="ck_document_capabilities_purpose"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("commercial_document_versions.id", ondelete="RESTRICT"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16), default="view")
+    token_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime)
+    revoked_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    first_viewed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    last_used_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+    version: Mapped["CommercialDocumentVersion"] = relationship()
+
+
+class EmailDelivery(Base):
+    """Durable record of one intended document email.
+
+    Created and committed BEFORE n8n or any provider is contacted. n8n claims
+    work with a lease, sends via the installation's verified sender, and
+    reports the outcome; an ambiguous outcome after submission may have begun
+    becomes `unknown` and is never retried automatically.
+    """
+
+    __tablename__ = "email_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "purpose IN ('quote', 'invoice', 'receipt', 'job_document')",
+            name="ck_email_deliveries_purpose",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'claimed', 'submitted', 'delivered', 'failed', "
+            "'unknown', 'suppressed')",
+            name="ck_email_deliveries_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # RESTRICT: delivery history must survive.
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("jobs.id", ondelete="RESTRICT"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16))
+    version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("commercial_document_versions.id", ondelete="RESTRICT")
+    )
+    job_document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("job_documents.id", ondelete="RESTRICT")
+    )
+    recipient: Mapped[str] = mapped_column(String(320))
+    from_name: Mapped[str] = mapped_column(String(200), default="")
+    from_address: Mapped[str] = mapped_column(String(320))
+    reply_to: Mapped[str] = mapped_column(String(320), default="")
+    subject: Mapped[str] = mapped_column(String(500))
+    body_text: Mapped[str] = mapped_column(Text)
+    body_html: Mapped[str] = mapped_column(Text, default="")
+    # Whether the PDF travels as an attachment or as a secure link only.
+    attach_pdf: Mapped[bool] = mapped_column(default=True)
+    capability_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("document_capabilities.id", ondelete="SET NULL")
+    )
+    template_generation: Mapped[int] = mapped_column(Integer, default=1)
+    idempotency_key_digest: Mapped[str] = mapped_column(String(64), unique=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    provider_message_id: Mapped[str | None] = mapped_column(String(200))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    claimed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    submitted_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    failed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    failure_class: Mapped[str | None] = mapped_column(String(32))
+    failure_message: Mapped[str | None] = mapped_column(String(500))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    job: Mapped["Job"] = relationship()

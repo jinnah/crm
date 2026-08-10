@@ -729,3 +729,348 @@ class UpdateUserAdminFieldsRequest(BaseModel):
 
     display_name: str | None = Field(default=None, max_length=100)
     notification_phone: str | None = Field(default=None, max_length=50)
+
+
+# --- Jobs ----------------------------------------------------------------
+
+
+class JobOut(BaseModel):
+    id: uuid.UUID
+    job_number: str
+    lead_id: uuid.UUID
+    lead_name: str | None = None
+    title: str
+    service_type: str
+    service_address: str
+    status: str
+    assigned_to: uuid.UUID | None
+    assignee_name: str | None = None
+    scheduled_for: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    internal_notes: str
+    archived_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class JobListOut(BaseModel):
+    items: list[JobOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class CreateJobRequest(BaseModel):
+    lead_id: uuid.UUID
+    title: str = Field(default="", max_length=200)
+    service_type: str = Field(default="", max_length=200)
+    service_address: str = Field(default="", max_length=300)
+    assigned_to: uuid.UUID | None = None
+    scheduled_for: datetime | None = None
+    internal_notes: str = Field(default="", max_length=5000)
+
+
+class UpdateJobRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    service_type: str | None = Field(default=None, max_length=200)
+    service_address: str | None = Field(default=None, max_length=300)
+    assigned_to: uuid.UUID | None = None
+    clear_assignee: bool = False
+    scheduled_for: datetime | None = None
+    clear_scheduled_for: bool = False
+    internal_notes: str | None = Field(default=None, max_length=5000)
+
+
+class JobStatusRequest(BaseModel):
+    status: str
+    note: str = Field(default="", max_length=300)
+
+
+class LinkAppointmentRequest(BaseModel):
+    appointment_id: uuid.UUID
+
+
+# --- Job documents -------------------------------------------------------
+
+
+class JobDocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    title: str
+    category: str
+    description: str
+    original_filename: str
+    content_type: str
+    byte_size: int
+    sha256: str
+    scan_state: str
+    scan_detail: str | None
+    has_preview: bool = False
+    archived_at: datetime | None
+    deleted_at: datetime | None
+    created_at: datetime
+
+
+class UpdateJobDocumentRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+    category: str | None = Field(default=None, max_length=16)
+    description: str | None = Field(default=None, max_length=1000)
+
+
+class MoveJobDocumentRequest(BaseModel):
+    target_job_id: uuid.UUID
+
+
+class DeleteJobDocumentRequest(BaseModel):
+    reason: str = Field(default="", max_length=300)
+
+
+# --- Commercial documents ------------------------------------------------
+
+
+class LineItemIn(BaseModel):
+    description: str = Field(max_length=500)
+    quantity_milli: int = Field(gt=0)
+    unit: str = Field(default="", max_length=20)
+    unit_price_minor: int = Field(ge=0)
+    discount_bp: int = Field(default=0, ge=0, le=10000)
+    tax_rate_bp: int = Field(default=0, ge=0, le=5000)
+
+
+class LineItemOut(LineItemIn):
+    position: int
+    line_total_minor: int
+
+
+class CommercialDocumentOut(BaseModel):
+    id: uuid.UUID
+    kind: str
+    job_id: uuid.UUID
+    status: str
+    number: str | None
+    currency: str
+    discount_bp: int
+    subtotal_minor: int
+    discount_total_minor: int
+    tax_total_minor: int
+    total_minor: int
+    amount_paid_minor: int
+    customer_notes: str
+    terms: str
+    valid_until: datetime | None
+    issued_at: datetime | None
+    due_at: datetime | None
+    current_version: int
+    responded_at: datetime | None
+    response_name: str | None
+    source_quote_id: uuid.UUID | None
+    converted_invoice_id: uuid.UUID | None
+    payment_id: uuid.UUID | None
+    voided_at: datetime | None
+    void_reason: str | None
+    created_at: datetime
+    lines: list[LineItemOut] = []
+
+
+class DraftRequest(BaseModel):
+    kind: Literal["quote", "invoice"]
+
+
+class UpdateDraftRequest(BaseModel):
+    lines: list[LineItemIn] = Field(max_length=100)
+    discount_bp: int = Field(default=0, ge=0, le=10000)
+    customer_notes: str = Field(default="", max_length=5000)
+    terms: str = Field(default="", max_length=5000)
+    valid_until: datetime | None = None
+    due_at: datetime | None = None
+
+
+class VoidRequest(BaseModel):
+    reason: str = Field(default="", max_length=300)
+
+
+class RecordPaymentRequest(BaseModel):
+    amount_minor: int = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    method: Literal["cash", "check", "bank_transfer", "card_external", "other"]
+    paid_on: datetime
+    reference: str = Field(default="", max_length=100)
+    internal_note: str = Field(default="", max_length=500)
+    idempotency_key: str = Field(min_length=8, max_length=100)
+
+
+class PaymentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    invoice_id: uuid.UUID
+    amount_minor: int
+    currency: str
+    method: str
+    paid_on: datetime
+    reference: str
+    internal_note: str
+    receipt_document_id: uuid.UUID | None
+    voided_at: datetime | None
+    void_reason: str | None
+    created_at: datetime
+
+
+class ReversePaymentRequest(BaseModel):
+    reason: str = Field(default="", max_length=300)
+
+
+class VersionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    document_id: uuid.UUID
+    version: int
+    number: str
+    pdf_sha256: str
+    pdf_byte_size: int
+    superseded_at: datetime | None
+    created_at: datetime
+
+
+# --- Email deliveries ----------------------------------------------------
+
+
+class SendDocumentEmailRequest(BaseModel):
+    # A plain bounded string: the service validates the shape, and reserved
+    # test domains (.test) must remain usable in automated validation.
+    recipient: str = Field(min_length=3, max_length=320)
+    attach_pdf: bool | None = None
+    send_key: str = Field(min_length=8, max_length=100)
+
+
+class EmailDeliveryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    purpose: str
+    version_id: uuid.UUID | None
+    recipient: str
+    from_name: str
+    from_address: str
+    reply_to: str
+    subject: str
+    attach_pdf: bool
+    status: str
+    attempts: int
+    provider_message_id: str | None
+    failure_class: str | None
+    failure_message: str | None
+    created_at: datetime
+    submitted_at: datetime | None
+    delivered_at: datetime | None
+
+
+# --- Documents & email settings -----------------------------------------
+
+
+class DocumentSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    default_currency: str
+    quote_number_prefix: str
+    invoice_number_prefix: str
+    receipt_number_prefix: str
+    default_quote_valid_days: int
+    default_invoice_due_days: int
+    default_tax_rate_bp: int
+    business_email: str
+    business_phone: str
+    business_address: str
+    business_registration_id: str
+    email_from_display_name: str
+    email_reply_to: str
+    quote_email_subject: str
+    quote_email_body: str
+    invoice_email_subject: str
+    invoice_email_body: str
+    receipt_email_subject: str
+    receipt_email_body: str
+    secure_link_expiry_days: int
+    email_attach_pdf_default: bool
+    # Read-only deployment configuration; never accepted on update.
+    effective_from_address: str = ""
+    sender_configured: bool = False
+
+
+class UpdateDocumentSettingsRequest(BaseModel):
+    default_currency: str | None = Field(default=None, min_length=3, max_length=3)
+    quote_number_prefix: str | None = Field(default=None, max_length=8)
+    invoice_number_prefix: str | None = Field(default=None, max_length=8)
+    receipt_number_prefix: str | None = Field(default=None, max_length=8)
+    default_quote_valid_days: int | None = Field(default=None, ge=1, le=365)
+    default_invoice_due_days: int | None = Field(default=None, ge=1, le=365)
+    default_tax_rate_bp: int | None = Field(default=None, ge=0, le=5000)
+    business_email: str | None = Field(default=None, max_length=320)
+    business_phone: str | None = Field(default=None, max_length=32)
+    business_address: str | None = Field(default=None, max_length=500)
+    business_registration_id: str | None = Field(default=None, max_length=100)
+    email_from_display_name: str | None = Field(default=None, max_length=200)
+    email_reply_to: str | None = Field(default=None, max_length=320)
+    quote_email_subject: str | None = Field(default=None, max_length=300)
+    quote_email_body: str | None = Field(default=None, max_length=5000)
+    invoice_email_subject: str | None = Field(default=None, max_length=300)
+    invoice_email_body: str | None = Field(default=None, max_length=5000)
+    receipt_email_subject: str | None = Field(default=None, max_length=300)
+    receipt_email_body: str | None = Field(default=None, max_length=5000)
+    secure_link_expiry_days: int | None = Field(default=None, ge=1, le=365)
+    email_attach_pdf_default: bool | None = None
+
+
+class StorageHealthOut(BaseModel):
+    storage: dict[str, str]
+    scanner: dict[str, str]
+    sender_configured: bool
+
+
+# --- Customer document access (internal BFF contract) -------------------
+
+
+class DocumentAccessRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=200)
+
+
+class QuoteResponseRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=200)
+    accept: bool
+    typed_name: str = Field(min_length=1, max_length=200)
+    website: str = Field(default="", max_length=100)  # honeypot
+
+
+# --- n8n document-email contract ----------------------------------------
+
+
+class ClaimEmailWorkRequest(BaseModel):
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class ClaimedEmailOut(BaseModel):
+    id: uuid.UUID
+    recipient: str
+    from_name: str
+    from_address: str
+    reply_to: str
+    subject: str
+    body_text: str
+    body_html: str
+    attach_pdf: bool
+    purpose: str
+    version_id: uuid.UUID | None
+    pdf_filename: str | None = None
+
+
+class ReportEmailResultRequest(BaseModel):
+    delivery_id: uuid.UUID
+    outcome: Literal["submitted", "delivered", "failed", "unknown"]
+    provider_message_id: str | None = Field(default=None, max_length=200)
+    failure_class: str | None = Field(default=None, max_length=32)
+    failure_message: str | None = Field(default=None, max_length=500)

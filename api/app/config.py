@@ -69,6 +69,38 @@ class Settings(BaseSettings):
     n8n_send_secret: str = ""
     twilio_from_number: str = ""
 
+    # --- Job documents: object storage --------------------------------
+    # Binaries live outside PostgreSQL behind this abstraction. "local" keeps
+    # objects under documents_local_path (a Docker volume in compose);
+    # production uses any S3-compatible store. Credentials only ever live
+    # here (environment/secrets), never in settings rows or the browser.
+    documents_storage_backend: Literal["local", "s3"] = "local"
+    documents_local_path: str = "./data/documents"
+    documents_s3_bucket: str = ""
+    documents_s3_endpoint_url: str = ""  # empty = provider default (AWS)
+    documents_s3_region: str = ""
+    documents_s3_access_key_id: str = ""
+    documents_s3_secret_access_key: str = ""
+
+    # --- Malware scanning ----------------------------------------------
+    # Files stay quarantined until a scan succeeds. "clamd" streams to a
+    # ClamAV daemon; "stub" is for development/tests only (detects the EICAR
+    # test signature) and is refused by production validation.
+    scanner_backend: Literal["clamd", "stub"] = "stub"
+    clamd_host: str = "clamav"
+    clamd_port: int = 3310
+
+    # --- Transactional document email ----------------------------------
+    # The one verified sender for this installation. Deployment
+    # configuration, shown read-only in settings; with no address configured,
+    # sending is disabled (drafts and PDFs still work) and nothing falls back
+    # to an unknown address. The provider credential itself lives in n8n.
+    document_email_from_address: str = ""
+    # Server-side key n8n presents on the document-email claim/report
+    # endpoints. Falls back to the inbound key when unset; with neither, the
+    # endpoints fail closed.
+    document_email_api_key: str = ""
+
     # Transactional SMTP for password-recovery email (not the future CRM email integration).
     smtp_host: str = ""
     smtp_port: int = 587
@@ -112,6 +144,12 @@ def validate_production_settings(settings: Settings) -> None:
         len(settings.internal_bff_key) < 32 or settings.internal_bff_key.startswith("dev-")
     ):
         problems.append("INTERNAL_BFF_KEY must be a generated secret of at least 32 characters")
+    if settings.scanner_backend == "stub":
+        problems.append("SCANNER_BACKEND must be 'clamd' in production; 'stub' is dev/test only")
+    if settings.documents_storage_backend == "s3" and not settings.documents_s3_bucket:
+        problems.append("DOCUMENTS_S3_BUCKET must be set when the s3 storage backend is selected")
+    if settings.document_email_api_key and len(settings.document_email_api_key) < 32:
+        problems.append("DOCUMENT_EMAIL_API_KEY must be at least 32 characters when set")
     if problems:
         raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
 

@@ -139,16 +139,14 @@ The owner account created at first login must change its temporary password befo
 
 ## n8n channel workflows
 
-Docker Compose includes an `n8n` service (http://localhost:5678, data persisted in the `n8n_data` volume). Channel workflows live in `n8n/workflows/` and are mounted read-only at `/workflows`. Import and activate them once per installation:
+Docker Compose includes an `n8n` service (http://localhost:5678, data persisted in the `n8n_data` volume). Channel workflows live in `n8n/workflows/` and are mounted read-only at `/workflows`. Install them with the repeatable installer, which is safe to run on every deployment and update:
 
 ```bash
-docker compose exec n8n n8n import:workflow --separate --input=/workflows
-# n8n 2.x publishes workflows individually (update:workflow --active was removed):
-docker compose exec n8n sh -c 'n8n list:workflow | cut -d"|" -f1 | xargs -I{} n8n publish:workflow --id={}'
+sh n8n/install-workflows.sh
 docker compose restart n8n
 ```
 
-The exported JSON carries no workflow id, so importing again creates a second copy rather than updating the first. Import once per installation; to update a workflow afterwards, open it in the editor and paste the new JSON, or delete the old copy there first.
+The installer lists what is already present, **stops with instructions if duplicate active workflows exist** (it never deletes workflow data itself), imports only workflows whose names are not installed yet, and publishes what it imported. To update an existing workflow, delete or rename the old copy deliberately in the editor (the n8n 2.x CLI has no delete command) and re-run the installer. This keeps every installation on the same versioned workflow set with no silent duplicates.
 
 ### Editor access and exposure
 
@@ -162,11 +160,38 @@ For any non-local deployment, put n8n behind a reverse proxy that:
 
 Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms`, `/webhook/twilio-voice`, `/webhook/twilio-status` (delivery callbacks), `/webhook/meta-whatsapp`, `/webhook/meta-messenger` (the Meta paths also answer the GET verification handshake), plus the internal `/webhook/twilio-send` the CRM calls to send SMS. "Appointment Reminders" has no webhook — it runs on a schedule and calls the CRM. Configure the provider secrets in `.env` (`TWILIO_AUTH_TOKEN`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, optional `FORM_SHARED_SECRET`); signature checks reject unauthenticated calls. In the n8n UI, set "Inbound Error Handler" as the default error workflow for the channel workflows. Website forms POST JSON with `submission_id`, `name`, `email`/`phone`, `message`, and optional `form`/`page`/`campaign`/`referrer`/`submitted_at`.
 
+## Jobs, documents and commercial records
+
+Every uploaded or generated document belongs to a job, and every job belongs to one customer, so a document's customer is always derived `document → job → lead`. Uploads accept PDF, PNG, JPEG and WebP only; content is proven by decoding (never the filename or client MIME), images are re-encoded with metadata stripped, and every file is quarantined until malware scanning passes. Quotes, invoices and receipts use integer minor units, concurrency-safe numbers (`Q-2026-0001`, …) assigned at issuance, and immutable issued versions whose exact PDF bytes and SHA-256 are stored; corrections supersede or void — history is never rewritten. Manual payments record externally completed money movement only (cash, check, bank transfer, externally processed card); the CRM stores no card or bank credentials and rejects likely card numbers in payment fields. Online payments are out of scope by design.
+
+### Document storage
+
+Binaries live outside PostgreSQL behind `DOCUMENTS_STORAGE_BACKEND`:
+
+- `local` (default): the `documents_data` volume, mounted at `/data/documents` in the `api` container.
+- `s3`: any S3-compatible store for production — set `DOCUMENTS_S3_BUCKET`, optional `DOCUMENTS_S3_ENDPOINT_URL` (non-AWS providers), `DOCUMENTS_S3_REGION`, and the key pair in deployment secrets.
+
+**Backups must cover the database and the object store together**: a database snapshot without the matching objects (or vice versa) restores documents whose files are missing. Take `pg_dump` and the object-store backup as one coordinated operation, and restore them as a pair. The authenticated `POST /api/v1/inbound/documents/reconcile` endpoint (run on a schedule by n8n, or manually) sweeps abandoned temporary objects and reports referenced-but-missing ones after a restore.
+
+### Malware scanning
+
+Uploads stay quarantined until scanning succeeds; a scanner outage fails closed. `SCANNER_BACKEND=stub` (EICAR-only) keeps development light; production **must** use `clamd` — start the bundled scanner with `docker compose --profile scanning up -d` (first start downloads signatures; allow a few minutes).
+
+### Document email
+
+The CRM never talks to an email provider. It records a durable delivery (recipient, subject, bodies, exact document version) and the **Document Email** n8n workflow claims the work, sends through the installation's one verified sender, and reports `submitted` / `failed` / `unknown` back — `delivered` is only ever set from a trusted provider confirmation. Setup per installation:
+
+1. Verify the sender address with your email provider, then set `DOCUMENT_EMAIL_FROM_ADDRESS` (and `DOCUMENT_EMAIL_API_KEY`) in `.env`. With no address configured, sending is disabled with a clear message; drafts and PDFs still work. Neither users nor API callers can override the From address.
+2. In the n8n editor, create an SMTP credential named **Document Email SMTP** and select it in the workflow's two send nodes.
+3. Set "Inbound Error Handler" as the workflow's error workflow.
+
+The owner-facing pieces (From display name, Reply-To, subject/body templates with a small variable allowlist, link expiry, attach-versus-link default) live in *Settings → Documents & email*.
+
 ## Shutdown and cleanup
 
 ```bash
 docker compose down            # stop containers (data is kept)
-docker compose down -v         # stop and DELETE the database volume
+docker compose down -v         # stop and DELETE the database, n8n, document and scanner volumes
 ```
 
 ## Public request form

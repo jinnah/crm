@@ -36,11 +36,30 @@ services:
       SMTP_TLS: ${SMTP_TLS:-starttls}
       INTERNAL_BFF_KEY: ${INTERNAL_BFF_KEY:-}
       VOICE_API_KEY: ${VOICE_API_KEY:-}
+      # Document storage: binaries live on the documents volume (or an
+      # S3-compatible store in production), never in PostgreSQL.
+      DOCUMENTS_STORAGE_BACKEND: ${DOCUMENTS_STORAGE_BACKEND:-local}
+      DOCUMENTS_LOCAL_PATH: /data/documents
+      DOCUMENTS_S3_BUCKET: ${DOCUMENTS_S3_BUCKET:-}
+      DOCUMENTS_S3_ENDPOINT_URL: ${DOCUMENTS_S3_ENDPOINT_URL:-}
+      DOCUMENTS_S3_REGION: ${DOCUMENTS_S3_REGION:-}
+      DOCUMENTS_S3_ACCESS_KEY_ID: ${DOCUMENTS_S3_ACCESS_KEY_ID:-}
+      DOCUMENTS_S3_SECRET_ACCESS_KEY: ${DOCUMENTS_S3_SECRET_ACCESS_KEY:-}
+      # Malware scanning: "clamd" uses the clamav service below; "stub" is
+      # dev/test only and refused by production validation.
+      SCANNER_BACKEND: ${SCANNER_BACKEND:-stub}
+      CLAMD_HOST: clamav
+      CLAMD_PORT: "3310"
+      # Transactional document email (the credential itself lives in n8n).
+      DOCUMENT_EMAIL_FROM_ADDRESS: ${DOCUMENT_EMAIL_FROM_ADDRESS:-}
+      DOCUMENT_EMAIL_API_KEY: ${DOCUMENT_EMAIL_API_KEY:-}
     ports:
       # Loopback-only by default: browsers reach the API through the same
       # host, and in production a reverse proxy is the only public boundary.
       # The internal capability endpoints additionally require the BFF key.
       - "127.0.0.1:8000:8000"
+    volumes:
+      - documents_data:/data/documents
     depends_on:
       db:
         condition: service_healthy
@@ -105,6 +124,7 @@ services:
       CRM_SEND_SECRET: ${N8N_SEND_SECRET:-}
       CRM_VOICE_API_KEY: ${VOICE_API_KEY:-}
       VOICE_INTAKE_SECRET: ${VOICE_INTAKE_SECRET:-}
+      CRM_DOCUMENT_EMAIL_KEY: ${DOCUMENT_EMAIL_API_KEY:-}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
       # Override only for local verification against a mock provider.
@@ -126,6 +146,24 @@ services:
       retries: 10
       start_period: 30s
 
+  # Malware scanning for uploaded documents. Optional in development (the
+  # stub scanner keeps local setups light: start with --profile scanning and
+  # set SCANNER_BACKEND=clamd to use it); REQUIRED in production. The signature
+  # database persists in clamav_data.
+  clamav:
+    image: clamav/clamav:stable
+    profiles: ["scanning"]
+    volumes:
+      - clamav_data:/var/lib/clamav
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --version >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 180s
+
 volumes:
   postgres_data:
   n8n_data:
+  documents_data:
+  clamav_data:

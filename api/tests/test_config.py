@@ -12,6 +12,8 @@ def production_settings(**overrides) -> Settings:
         "session_token_pepper": REAL_LOOKING_PEPPER,
         "session_cookie_secure": True,
         "frontend_url": "https://crm.example.com",
+        # The dev/test stub scanner is refused in production.
+        "scanner_backend": "clamd",
     }
     values.update(overrides)
     return Settings(**values)
@@ -40,6 +42,16 @@ def test_production_rejects_http_frontend() -> None:
 
 def test_production_accepts_safe_configuration() -> None:
     validate_production_settings(production_settings())
+
+
+def test_production_rejects_stub_scanner() -> None:
+    with pytest.raises(RuntimeError, match="SCANNER_BACKEND"):
+        validate_production_settings(production_settings(scanner_backend="stub"))
+
+
+def test_production_rejects_s3_without_bucket() -> None:
+    with pytest.raises(RuntimeError, match="DOCUMENTS_S3_BUCKET"):
+        validate_production_settings(production_settings(documents_storage_backend="s3"))
 
 
 def test_development_allows_local_placeholders() -> None:

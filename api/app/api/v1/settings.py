@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from app.api.v1.deps import (
     DbDep,
     FullyAuthedUserDep,
+    SettingsDep,
     check_csrf,
     check_origin,
     get_branding_limiter,
@@ -12,17 +13,23 @@ from app.api.v1.deps import (
 from app.api.v1.schemas import (
     BrandingOut,
     CommunicationSettingsOut,
+    DocumentSettingsOut,
     PublicFormInfoOut,
     SchedulingBasicsOut,
     SchedulingSettingsOut,
+    StorageHealthOut,
     UpdateCommunicationSettingsRequest,
+    UpdateDocumentSettingsRequest,
     UpdateSchedulingSettingsRequest,
     UpdateVoiceSettingsRequest,
     VoiceSettingsOut,
 )
 from app.services import branding, messaging, scheduling
+from app.services import document_email as document_email_service
 from app.services import voice as voice_service
+from app.services.document_email import EmailError as EmailTemplateError
 from app.services.leads import LeadError
+from app.services.numbering import NumberingError, validate_prefix
 from app.services.rate_limit import RateLimiter
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -317,3 +324,90 @@ def update_voice_settings(
         raise HTTPException(status_code=error.status_code, detail=error.message) from error
     db.commit()
     return VoiceSettingsOut.model_validate(row)
+
+
+def _document_settings_out(row, settings) -> DocumentSettingsOut:
+    out = DocumentSettingsOut.model_validate(row)
+    # Deployment configuration, read-only: no request body can change it.
+    out.effective_from_address = settings.document_email_from_address
+    out.sender_configured = bool(settings.document_email_from_address)
+    return out
+
+
+@router.get(
+    "/documents",
+    response_model=DocumentSettingsOut,
+    dependencies=[Depends(check_origin)],
+)
+def get_document_settings(
+    user: FullyAuthedUserDep, db: DbDep, settings: SettingsDep
+) -> DocumentSettingsOut:
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="You are not allowed to view these settings.")
+    row = messaging.get_settings_row(db)
+    db.commit()
+    return _document_settings_out(row, settings)
+
+
+@router.patch(
+    "/documents",
+    response_model=DocumentSettingsOut,
+    dependencies=[Depends(check_origin), Depends(check_csrf)],
+)
+def update_document_settings(
+    body: UpdateDocumentSettingsRequest,
+    user: FullyAuthedUserDep,
+    db: DbDep,
+    settings: SettingsDep,
+) -> DocumentSettingsOut:
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="You are not allowed to change these settings.")
+    row = messaging.get_settings_row(db)
+    changes = body.model_dump(exclude_unset=True)
+    try:
+        for field in ("quote_number_prefix", "invoice_number_prefix", "receipt_number_prefix"):
+            if field in changes:
+                changes[field] = validate_prefix(changes[field])
+        if "default_currency" in changes:
+            currency = changes["default_currency"].upper()
+            if not currency.isalpha() or len(currency) != 3:
+                raise LeadError("The currency must be a three-letter ISO code.")
+            changes["default_currency"] = currency
+        for field in (
+            "quote_email_subject",
+            "quote_email_body",
+            "invoice_email_subject",
+            "invoice_email_body",
+            "receipt_email_subject",
+            "receipt_email_body",
+        ):
+            if field in changes:
+                changes[field] = document_email_service.validate_template(changes[field])
+        for field, value in changes.items():
+            setattr(row, field, value)
+    except (LeadError, NumberingError, EmailTemplateError) as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=getattr(error, "status_code", 400),
+            detail=getattr(error, "message", "Invalid settings."),
+        ) from error
+    db.commit()
+    return _document_settings_out(row, settings)
+
+
+@router.get(
+    "/documents/health",
+    response_model=StorageHealthOut,
+    dependencies=[Depends(check_origin)],
+)
+def document_configuration_health(
+    request: Request, user: FullyAuthedUserDep, settings: SettingsDep
+) -> StorageHealthOut:
+    """Storage/scanner/email configuration state — never any secret values."""
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="You are not allowed to view this.")
+    return StorageHealthOut(
+        storage=request.app.state.document_storage.health(),
+        scanner=request.app.state.document_scanner.health(),
+        sender_configured=bool(settings.document_email_from_address),
+    )

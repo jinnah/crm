@@ -159,3 +159,14 @@ def default_branding_limiter() -> SlidingWindowRateLimiter:
     # Logo changes are rare and expensive to process: 10 per 10 minutes per
     # account, then a 10-minute lockout.
     return SlidingWindowRateLimiter(max_events=10, window_seconds=600, lockout_seconds=600)
+
+
+def default_document_upload_limiter() -> SlidingWindowRateLimiter:
+    # Uploads are validated, re-encoded and scanned: 30 per 10 minutes per
+    # account, then a 10-minute lockout.
+    return SlidingWindowRateLimiter(max_events=30, window_seconds=600, lockout_seconds=600)
+
+
+def default_document_download_limiter() -> SlidingWindowRateLimiter:
+    # Generous but bounded: 300 downloads/previews per 10 minutes per account.
+    return SlidingWindowRateLimiter(max_events=300, window_seconds=600, lockout_seconds=600)

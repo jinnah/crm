@@ -1,0 +1,543 @@
+{
+  "name": "Document Email",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "docmail-schedule",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/document-emails/claim",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_DOCUMENT_EMAIL_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\"limit\": 5}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "docmail-claim",
+      "name": "Claim Email Work",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Unpack the claim. Every outgoing item carries ONLY fields the CRM\n// snapshotted; the verified sender comes from the claim alone and any\n// attempt to smuggle a different one is ignored here by construction.\n// Nothing in this workflow ever logs bodies, addresses or credentials.\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\nif (status < 200 || status >= 300) {\n  return [{ json: { outcome: 'claim_failed', status } }];\n}\nconst body = Array.isArray(response.body) ? response.body : [];\nreturn body.map((item) => ({\n  json: {\n    outcome: item.attach_pdf ? 'send_attach' : 'send_link',\n    delivery_id: String(item.id),\n    recipient: String(item.recipient || ''),\n    from_name: String(item.from_name || ''),\n    from_address: String(item.from_address || ''),\n    reply_to: String(item.reply_to || ''),\n    subject: String(item.subject || ''),\n    body_text: String(item.body_text || ''),\n    body_html: String(item.body_html || ''),\n    pdf_filename: String(item.pdf_filename || 'document.pdf'),\n  },\n}));\n"
+      },
+      "id": "docmail-unpack",
+      "name": "Unpack Claims",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [420, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "send_attach",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "attach"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "send_link",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "link"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "claim_failed"
+        }
+      },
+      "id": "docmail-route-claim",
+      "name": "Route Claim",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [620, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/document-emails/{{ $json.delivery_id }}/pdf",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_DOCUMENT_EMAIL_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "attachment"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "docmail-fetch-pdf",
+      "name": "Fetch PDF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, -140],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.from_name ? ($json.from_name + ' <' + $json.from_address + '>') : $json.from_address }}",
+        "toEmail": "={{ $json.recipient }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.body_text }}",
+        "html": "={{ $json.body_html }}",
+        "options": {
+          "replyTo": "={{ $json.reply_to }}",
+          "attachments": "attachment"
+        }
+      },
+      "id": "docmail-send-attach",
+      "name": "Send With Attachment",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1060, -140],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.from_name ? ($json.from_name + ' <' + $json.from_address + '>') : $json.from_address }}",
+        "toEmail": "={{ $json.recipient }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "both",
+        "text": "={{ $json.body_text }}",
+        "html": "={{ $json.body_html }}",
+        "options": {
+          "replyTo": "={{ $json.reply_to }}"
+        }
+      },
+      "id": "docmail-send-link",
+      "name": "Send Link Only",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1060, 140],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Classify every send attempt. Output: delivery_id + outcome + a bounded\n// class/message — never subjects, bodies, addresses or credentials.\n//\n// - accepted by the provider            -> report submitted\n// - failed BEFORE submission began      -> leave claimed; the CRM's claim\n//   lease expires and the next run retries (transient network/connect/auth)\n// - definite permanent provider refusal -> report failed\n// - anything ambiguous                  -> report unknown, never auto-retried\nconst PRE_SUBMISSION = [/econnrefused/i, /etimedout/i, /eai_again/i, /enotfound/i, /econnreset before/i, /greeting/i, /connect/i, /authentication/i, /auth\\b/i, /login/i, /421/, /\\b45[012]\\b/];\nconst PERMANENT = [/\\b55[0-9]\\b/, /mailbox/i, /recipient.*(rejected|unknown|invalid)/i, /denied/i];\nconst items = $input.all();\nreturn items.map((item) => {\n  const data = item.json || {};\n  const errorText = String((item.error && item.error.message) || data.error || '').slice(0, 300);\n  if (!errorText) {\n    return { json: { outcome: 'submitted', delivery_id: String(data.delivery_id || ''), provider_message_id: String(data.messageId || '').slice(0, 190) } };\n  }\n  if (PRE_SUBMISSION.some((pattern) => pattern.test(errorText))) {\n    return { json: { outcome: 'leave', delivery_id: String(data.delivery_id || ''), failure_class: 'pre_submission' } };\n  }\n  if (PERMANENT.some((pattern) => pattern.test(errorText))) {\n    return { json: { outcome: 'failed', delivery_id: String(data.delivery_id || ''), failure_class: 'provider_rejected', failure_message: errorText } };\n  }\n  return { json: { outcome: 'unknown', delivery_id: String(data.delivery_id || ''), failure_class: 'ambiguous', failure_message: errorText } };\n});\n"
+      },
+      "id": "docmail-classify-send",
+      "name": "Classify Send",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1280, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "submitted",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "submitted"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "failed",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "failed"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "version": 2 },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "unknown",
+                    "operator": { "type": "string", "operation": "equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "unknown"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "leave"
+        }
+      },
+      "id": "docmail-route-send",
+      "name": "Route Send",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [1500, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/document-emails/report",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_DOCUMENT_EMAIL_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_id: $json.delivery_id, outcome: 'submitted', provider_message_id: $json.provider_message_id || null }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "docmail-report-submitted",
+      "name": "Report Submitted",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, -200],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/document-emails/report",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_DOCUMENT_EMAIL_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_id: $json.delivery_id, outcome: 'failed', failure_class: $json.failure_class || 'provider_error', failure_message: ($json.failure_message || '').slice(0, 480) }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "docmail-report-failed",
+      "name": "Report Failed",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, 0],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/document-emails/report",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_DOCUMENT_EMAIL_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ delivery_id: $json.delivery_id, outcome: 'unknown', failure_class: $json.failure_class || 'ambiguous', failure_message: ($json.failure_message || '').slice(0, 480) }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "docmail-report-unknown",
+      "name": "Report Unknown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1740, 200],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Bounded counts only — never message content or addresses.\nconst items = $input.all();\nconst counts = {};\nfor (const item of items) {\n  const key = String((item.json && (item.json.outcome || (item.json.body && item.json.body.status))) || 'reported');\n  counts[key] = (counts[key] || 0) + 1;\n}\nreturn [{ json: { outcome: 'run_complete', counts, ran_at: new Date().toISOString() } }];\n"
+      },
+      "id": "docmail-summarize",
+      "name": "Summarize Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The CRM was unreachable or refused the claim. Nothing was sent and\n// nothing needs undoing: pending work stays durable in the CRM and the\n// next scheduled run claims it again.\nconst item = $input.all()[0].json;\nreturn [{\n  json: {\n    outcome: 'not_claimed',\n    status: Number(item.status || 0) || null,\n    ran_at: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "docmail-give-up",
+      "name": "Give Up Until Next Run",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [840, 320]
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Claim Email Work",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim Email Work": {
+      "main": [
+        [
+          {
+            "node": "Unpack Claims",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unpack Claims": {
+      "main": [
+        [
+          {
+            "node": "Route Claim",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Claim": {
+      "main": [
+        [
+          {
+            "node": "Fetch PDF",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Send Link Only",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Next Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch PDF": {
+      "main": [
+        [
+          {
+            "node": "Send With Attachment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send With Attachment": {
+      "main": [
+        [
+          {
+            "node": "Classify Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Link Only": {
+      "main": [
+        [
+          {
+            "node": "Classify Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Send": {
+      "main": [
+        [
+          {
+            "node": "Route Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Send": {
+      "main": [
+        [
+          {
+            "node": "Report Submitted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report Failed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report Unknown",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Summarize Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Submitted": {
+      "main": [
+        [
+          {
+            "node": "Summarize Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Failed": {
+      "main": [
+        [
+          {
+            "node": "Summarize Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report Unknown": {
+      "main": [
+        [
+          {
+            "node": "Summarize Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "active": false,
+  "pinData": {}
+}
