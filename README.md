@@ -200,3 +200,74 @@ curl -X POST -H "X-API-Key: $INBOUND_API_KEY" \
 ```
 
 The CRM claims each notification atomically and owns every send, so overlapping runs cannot send a reminder twice and n8n never touches PostgreSQL. An interrupted provider response is recorded as `unknown` and never resent automatically — it surfaces in the attention queue for someone to check.
+
+## AI voice-call channel
+
+A Twilio number answered by an AI voice agent (any provider) feeds the CRM as
+the authoritative store — the agent and n8n never touch PostgreSQL, and no
+Twilio or AI credentials ever enter the database, the browser or workflow
+JSON. The flow is: call -> AI agent/n8n -> "Voice Call Intake" workflow ->
+`POST /api/v1/inbound/voice-calls/completed` -> lead + durable call record +
+SMS intents committed -> acknowledgment and staff alerts through the existing
+Twilio send path.
+
+Point the existing AI voice workflow at the intake webhook with the shared
+secret, sending one structured completion per call:
+
+```
+POST http://localhost:5678/webhook/voice-complete
+X-Voice-Secret: <VOICE_INTAKE_SECRET>
+{
+  "call_sid": "CA0123456789abcdef0123456789abcdef",
+  "caller_phone": "+15555550123",
+  "caller_name": "Pat Example",
+  "call_status": "completed",
+  "service_requested": "Water heater replacement",
+  "summary": "No hot water since Monday; wants a quote this week.",
+  "preferred_callback_window": "weekday mornings",
+  "appointment_preference": "Tuesday if possible",
+  "urgency": "normal",
+  "requires_human_follow_up": false,
+  "transfer_outcome": "none",
+  "disclosure_version": "v1",
+  "consent_result": "granted",
+  "started_at": "2026-08-09T14:00:00Z",
+  "ended_at": "2026-08-09T14:06:00Z",
+  "duration_seconds": 360
+}
+```
+
+`call_sid` is the idempotency identity: replays return the original result,
+and a retry that disagrees about the caller's number gets 409 and flags the
+record for review instead of rewriting history. Matching is conservative — an
+exact phone match appends to that lead, ambiguity creates a review lead, and
+collected values never overwrite populated CRM fields.
+
+The agent can also offer real appointment slots mid-call through
+server-to-server tools (`POST /api/v1/inbound/voice/availability` and
+`/voice/book`, authenticated with `VOICE_API_KEY` or the inbound key, CallSid
+in the body). Booking accepts only an exactly offered slot from the same
+corrected scheduler as public booking and is idempotent per call. A caller's
+stated preference is stored as text on the call — it is never presented as a
+confirmed appointment.
+
+Owners configure acknowledgment/alert messages, recipients (business number,
+assigned staff's notification phone, or both), the default voice-booking
+staff member and transcript retention under **Settings -> Voice calls**.
+Transcript retention is off by default; when enabled it requires per-call
+consent, keeps bounded text for the configured days, and the daily
+"Voice Transcript Cleanup" workflow purges expired or consent-less
+transcripts and recording references while the summary and audit trail
+survive. Google Sheets can stay as an optional export after CRM success, but
+it is no longer authoritative and its failures never roll back the CRM.
+
+## Production reverse-proxy boundary
+
+The API container binds to `127.0.0.1` — in production only a reverse proxy
+faces the internet. It should: forward `/api/v1/public/*` (form info, logo,
+branding) and nothing else of the API to browsers; keep `/api/v1/internal/*`
+and `/api/v1/inbound/*` unreachable from outside (the BFF and n8n reach them
+over the internal network with their keys); and avoid logging request bodies
+or the `/book/[token]` / `/appointment/[token]` page URLs, which carry
+capability tokens (FastAPI itself never sees tokens in URLs — the BFF sends
+them in request bodies on fixed internal paths).

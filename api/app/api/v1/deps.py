@@ -90,6 +90,19 @@ def get_branding_limiter(request: Request) -> RateLimiter:
     return request.app.state.branding_limiter
 
 
+def require_internal_key(request: Request, settings: SettingsDep) -> None:
+    """Server-to-server guard for the internal capability endpoints.
+
+    Only the Next.js BFF holds this credential; the browser never sees it.
+    With no key configured the endpoints fail closed. The comparison is
+    constant-time and nothing about the header is ever logged.
+    """
+    configured = settings.internal_bff_key
+    provided = request.headers.get("X-Internal-Key") or ""
+    if not configured or not constant_time_equals(provided, configured):
+        raise HTTPException(status_code=401, detail="Not authorized.")
+
+
 def get_mailer(request: Request):
     return request.app.state.mailer
 

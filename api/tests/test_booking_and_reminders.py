@@ -16,7 +16,7 @@ from app.models import (
 from app.services import appointment_notifications as notifications
 from app.services import calendar_file
 from app.services.messaging import SendOutcome
-from tests.conftest import TEST_INBOUND_KEY, csrf_headers, login
+from tests.conftest import TEST_INBOUND_KEY, csrf_headers, internal_headers, login
 from tests.test_scheduling import settings_for
 
 
@@ -43,6 +43,47 @@ def enable_scheduling(client, db, headers, **overrides):
     )
 
 
+def booking_info(client, token, **extra):
+    """BFF-style lookup: fixed path, token in the body, internal credential."""
+    return client.post(
+        "/api/v1/internal/booking/info",
+        json={"token": token, **extra},
+        headers=internal_headers(),
+    )
+
+
+def booking_confirm(client, token, start_at, booking_key, **extra):
+    return client.post(
+        "/api/v1/internal/booking/confirm",
+        json={"token": token, "start_at": start_at, "booking_key": booking_key, **extra},
+        headers=internal_headers(),
+    )
+
+
+def manage_info(client, token):
+    return client.post(
+        "/api/v1/internal/appointments/info",
+        json={"token": token},
+        headers=internal_headers(),
+    )
+
+
+def manage_cancel(client, token):
+    return client.post(
+        "/api/v1/internal/appointments/cancel",
+        json={"token": token},
+        headers=internal_headers(),
+    )
+
+
+def manage_reschedule(client, token, start_at, expected_revision):
+    return client.post(
+        "/api/v1/internal/appointments/reschedule",
+        json={"token": token, "start_at": start_at, "expected_revision": expected_revision},
+        headers=internal_headers(),
+    )
+
+
 # --- booking links -------------------------------------------------------
 
 
@@ -64,11 +105,11 @@ def test_booking_link_hashes_token_and_is_revocable(client, db, make_user, sms_s
     assert row.token_digest != raw
     assert raw not in row.token_digest
 
-    assert client.get(f"/api/v1/public/book/{raw}").status_code == 200
+    assert booking_info(client, raw).status_code == 200
 
     revoked = client.post(f"/api/v1/leads/{lead['id']}/booking-link/revoke", headers=headers)
     assert revoked.status_code == 200
-    assert client.get(f"/api/v1/public/book/{raw}").status_code == 410
+    assert booking_info(client, raw).status_code == 410
 
 
 def test_regenerating_a_link_invalidates_the_previous_one(client, db, make_user, sms_sender):
@@ -87,8 +128,8 @@ def test_regenerating_a_link_invalidates_the_previous_one(client, db, make_user,
     )
 
     assert first != second
-    assert client.get(f"/api/v1/public/book/{first}").status_code == 410
-    assert client.get(f"/api/v1/public/book/{second}").status_code == 200
+    assert booking_info(client, first).status_code == 410
+    assert booking_info(client, second).status_code == 200
 
 
 def test_expired_link_is_rejected(client, db, make_user, sms_sender) -> None:
@@ -104,13 +145,42 @@ def test_expired_link_is_rejected(client, db, make_user, sms_sender) -> None:
     link = db.scalar(select(BookingLink))
     link.expires_at = utcnow() - timedelta(minutes=1)
     db.commit()
-    assert client.get(f"/api/v1/public/book/{raw}").status_code == 410
+    assert booking_info(client, raw).status_code == 410
 
 
 def test_unknown_token_is_rejected(client, db, make_user, sms_sender) -> None:
     headers = owner_session(client, make_user)
     enable_scheduling(client, db, headers)
-    assert client.get("/api/v1/public/book/" + "z" * 43).status_code == 404
+    assert booking_info(client, "z" * 43).status_code == 404
+    # The old token-in-URL routes no longer exist at all.
+    assert client.get("/api/v1/public/book/" + "z" * 43).status_code in (404, 405)
+
+
+def test_internal_endpoints_require_the_bff_credential(client, db, make_user, sms_sender) -> None:
+    """Direct FastAPI access without the server-only credential fails closed,
+    whatever the token is."""
+    headers = owner_session(client, make_user)
+    enable_scheduling(client, db, headers)
+    lead = make_lead(client, headers, phone="+15550500055")
+    raw = (
+        client.post(f"/api/v1/leads/{lead['id']}/booking-link", json={}, headers=headers)
+        .json()["url"]
+        .rsplit("/", 1)[-1]
+    )
+    # No credential, wrong credential: both are 401 before any token check.
+    for bad_headers in ({}, {"X-Internal-Key": "wrong-key-wrong-key-wrong-key-000"}):
+        response = client.post(
+            "/api/v1/internal/booking/info", json={"token": raw}, headers=bad_headers
+        )
+        assert response.status_code == 401
+        response = client.post(
+            "/api/v1/internal/booking/confirm",
+            json={"token": raw, "start_at": "2026-09-01T14:00:00Z", "booking_key": "k" * 10},
+            headers=bad_headers,
+        )
+        assert response.status_code == 401
+    # With the credential the same token works.
+    assert booking_info(client, raw).status_code == 200
 
 
 def test_team_member_cannot_create_a_link_for_another_lead(client, db, make_user, sms_sender):
@@ -129,7 +199,7 @@ def test_team_member_cannot_create_a_link_for_another_lead(client, db, make_user
 
 
 def _first_slot(client, raw):
-    info = client.get(f"/api/v1/public/book/{raw}").json()
+    info = booking_info(client, raw).json()
     assert info["days"], "expected available days"
     return info["days"][0]["slots"][0]
 
@@ -149,7 +219,7 @@ def test_public_page_exposes_only_safe_information(client, db, make_user, sms_se
         .rsplit("/", 1)[-1]
     )
 
-    response = client.get(f"/api/v1/public/book/{raw}")
+    response = booking_info(client, raw)
     assert response.status_code == 200
     body = response.text
     # Nothing internal may leak.
@@ -167,7 +237,12 @@ def test_public_page_exposes_only_safe_information(client, db, make_user, sms_se
         "duration_minutes",
         "timezone",
         "days",
+        "window_days",
+        "next_start_day",
     }
+    # Availability covers the configured window through bounded paging, not a
+    # hard-coded fortnight.
+    assert payload["window_days"] > 0
 
 
 def test_customer_books_and_repeat_submission_is_idempotent(client, db, make_user, sms_sender):
@@ -181,16 +256,12 @@ def test_customer_books_and_repeat_submission_is_idempotent(client, db, make_use
     )
     slot = _first_slot(client, raw)
 
-    first = client.post(
-        f"/api/v1/public/book/{raw}", json={"start_at": slot, "booking_key": "cust-key-0001"}
-    )
+    first = booking_confirm(client, raw, slot, "cust-key-0001")
     assert first.status_code == 200, first.text
     assert first.json()["booking_reference"].startswith("APT-")
     assert first.json()["manage_token"]
 
-    second = client.post(
-        f"/api/v1/public/book/{raw}", json={"start_at": slot, "booking_key": "cust-key-0001"}
-    )
+    second = booking_confirm(client, raw, slot, "cust-key-0001")
     assert second.status_code == 200
     assert second.json()["duplicate"] is True
     assert second.json()["booking_reference"] == first.json()["booking_reference"]
@@ -218,15 +289,8 @@ def test_booking_a_taken_slot_is_a_conflict(client, db, make_user, sms_sender) -
     )
     slot = _first_slot(client, raw)
 
-    assert (
-        client.post(
-            f"/api/v1/public/book/{raw}", json={"start_at": slot, "booking_key": "key-a-000001"}
-        ).status_code
-        == 200
-    )
-    clash = client.post(
-        f"/api/v1/public/book/{raw}", json={"start_at": slot, "booking_key": "key-b-000001"}
-    )
+    assert booking_confirm(client, raw, slot, "key-a-000001").status_code == 200
+    clash = booking_confirm(client, raw, slot, "key-b-000001")
     assert clash.status_code == 409
 
 
@@ -240,10 +304,7 @@ def test_honeypot_submission_creates_nothing(client, db, make_user, sms_sender) 
         .rsplit("/", 1)[-1]
     )
     slot = _first_slot(client, raw)
-    response = client.post(
-        f"/api/v1/public/book/{raw}",
-        json={"start_at": slot, "booking_key": "bot-key-0001", "website": "http://spam"},
-    )
+    response = booking_confirm(client, raw, slot, "bot-key-0001", website="http://spam")
     assert response.status_code == 422
     assert db.scalar(select(func.count()).select_from(Appointment)) == 0
 
@@ -260,7 +321,7 @@ def test_self_booking_can_be_disabled(client, db, make_user, sms_sender) -> None
     client.patch(
         "/api/v1/settings/scheduling", json={"self_booking_enabled": False}, headers=headers
     )
-    assert client.get(f"/api/v1/public/book/{raw}").status_code == 403
+    assert booking_info(client, raw).status_code == 403
 
 
 # --- notifications -------------------------------------------------------
@@ -398,10 +459,11 @@ def test_reschedule_suppresses_obsolete_reminders(client, db, make_user, sms_sen
     new_start = (utcnow() + timedelta(days=5)).replace(microsecond=0).isoformat()
     response = client.post(
         f"/api/v1/appointments/{appointment['id']}/reschedule",
-        json={"start_at": new_start},
+        json={"start_at": new_start, "expected_revision": appointment["revision"]},
         headers=headers,
     )
     assert response.status_code == 200
+    assert response.json()["revision"] == appointment["revision"] + 1
     db.refresh(original)
     assert original.state == "suppressed"
 
@@ -432,7 +494,11 @@ def test_cancellation_suppresses_reminders_and_notifies(client, db, make_user, s
 
     response = client.post(
         f"/api/v1/appointments/{appointment['id']}/disposition",
-        json={"status": "canceled", "reason": "customer rescheduled by phone"},
+        json={
+            "status": "canceled",
+            "reason": "customer rescheduled by phone",
+            "expected_revision": appointment["revision"],
+        },
         headers=headers,
     )
     assert response.status_code == 200
@@ -519,11 +585,12 @@ def test_ics_marks_cancellation(client, db, make_user, sms_sender) -> None:
     enable_scheduling(client, db, headers)
     lead = make_lead(client, headers)
     appointment = _create_appointment(client, headers, lead["id"]).json()
-    client.post(
+    canceled = client.post(
         f"/api/v1/appointments/{appointment['id']}/disposition",
-        json={"status": "canceled"},
+        json={"status": "canceled", "expected_revision": appointment["revision"]},
         headers=headers,
     )
+    assert canceled.status_code == 200
     content = client.get(
         f"/api/v1/appointments/{appointment['id']}/calendar.ics", headers=headers
     ).text
@@ -733,11 +800,12 @@ def book_with_manage_token(client, db, headers, phone="+15550500070", day_index=
         .json()["url"]
         .rsplit("/", 1)[-1]
     )
-    info = client.get(f"/api/v1/public/book/{raw}").json()
+    info = booking_info(client, raw).json()
     slot = info["days"][day_index]["slots"][0]
     result = client.post(
-        f"/api/v1/public/book/{raw}",
-        json={"start_at": slot, "booking_key": f"key-{phone}"},
+        "/api/v1/internal/booking/confirm",
+        json={"token": raw, "start_at": slot, "booking_key": f"key-{phone}"},
+        headers=internal_headers(),
     )
     assert result.status_code == 200, result.text
     return lead, result.json()
@@ -752,16 +820,16 @@ def test_knowing_the_appointment_uuid_grants_no_customer_access(
 
     appointment = db.scalar(select(Appointment))
     # The UUID is not a capability, and neither is the quotable reference.
-    assert client.get(f"/api/v1/public/appointments/{appointment.id}").status_code == 404
-    assert client.post(f"/api/v1/public/appointments/{appointment.id}/cancel").status_code == 404
+    assert manage_info(client, str(appointment.id)).status_code == 404
+    assert manage_cancel(client, str(appointment.id)).status_code == 404
     reference = booked["booking_reference"]
-    assert client.get(f"/api/v1/public/appointments/{reference}xxxxxxxxxxxxxx").status_code == 404
+    assert manage_info(client, f"{reference}xxxxxxxxxxxxxx").status_code == 404
 
     # Only the issued capability opens it, and it is stored as a digest.
     token = booked["manage_token"]
     assert token
     assert appointment.manage_token_digest != token
-    view = client.get(f"/api/v1/public/appointments/{token}")
+    view = manage_info(client, token)
     assert view.status_code == 200
     body = view.json()
     assert body["booking_reference"] == reference
@@ -779,7 +847,7 @@ def test_customer_cancellation_suppresses_reminders_and_frees_the_slot(
     _, booked = book_with_manage_token(client, db, headers, phone="+15550500071")
     token = booked["manage_token"]
 
-    canceled = client.post(f"/api/v1/public/appointments/{token}/cancel")
+    canceled = manage_cancel(client, token)
     assert canceled.status_code == 200
     assert canceled.json()["status"] == "canceled"
     assert canceled.json()["can_change"] is False
@@ -806,7 +874,7 @@ def test_customer_cancellation_suppresses_reminders_and_frees_the_slot(
     ) or any(slot.startswith(booked["start_at"][:16]) for slot in slots)
 
     # A second cancellation changes nothing.
-    again = client.post(f"/api/v1/public/appointments/{token}/cancel")
+    again = manage_cancel(client, token)
     assert again.status_code in (200, 409)
 
 
@@ -824,7 +892,7 @@ def test_customer_reschedule_moves_the_time_and_replaces_reminders(
         )
     ).all(), "a reminder must be waiting before the move, or the test proves nothing"
 
-    offered = client.get(f"/api/v1/public/appointments/{token}").json()["days"]
+    offered = manage_info(client, token).json()["days"]
     later = [
         slot
         for day in offered[-1:]
@@ -833,11 +901,26 @@ def test_customer_reschedule_moves_the_time_and_replaces_reminders(
     ]
     assert later, "the customer must be offered an alternative time"
 
-    moved = client.post(
-        f"/api/v1/public/appointments/{token}/reschedule", json={"start_at": later[0]}
-    )
+    revision = manage_info(client, token).json()["revision"]
+    moved = manage_reschedule(client, token, later[0], revision)
     assert moved.status_code == 200
     assert moved.json()["start_at"][:19] == later[0][:19]
+
+    # Replaying the exact same move with the OLD revision is idempotent: the
+    # appointment stays put and no second rescheduled notice is queued.
+    replay = manage_reschedule(client, token, later[0], revision)
+    assert replay.status_code == 200
+    rescheduled_count = len(
+        db.scalars(
+            select(AppointmentNotification).where(AppointmentNotification.type == "rescheduled")
+        ).all()
+    )
+    assert rescheduled_count == 1
+
+    # A genuinely stale different move is refused.
+    other_slot = [slot for day in offered[-1:] for slot in day["slots"]][-1]
+    stale = manage_reschedule(client, token, other_slot, revision)
+    assert stale.status_code == 409
 
     # The customer is told, once, that the time changed.
     rescheduled = db.scalars(
@@ -855,8 +938,14 @@ def test_customer_reschedule_moves_the_time_and_replaces_reminders(
 
     # The honeypot is refused without touching the appointment.
     trapped = client.post(
-        f"/api/v1/public/appointments/{token}/reschedule",
-        json={"start_at": later[0], "website": "http://spam.example"},
+        "/api/v1/internal/appointments/reschedule",
+        json={
+            "token": token,
+            "start_at": later[0],
+            "expected_revision": 99,
+            "website": "http://spam.example",
+        },
+        headers=internal_headers(),
     )
     assert trapped.status_code == 422
 
@@ -871,7 +960,7 @@ def test_customer_cannot_reschedule_into_a_taken_slot(client, db, make_user, sms
     original_start = appointment.start_at
 
     # Take one of the times the customer is being offered, from under them.
-    offered = client.get(f"/api/v1/public/appointments/{token}").json()["days"]
+    offered = manage_info(client, token).json()["days"]
     candidates = [
         slot for day in offered for slot in day["slots"] if slot[:19] != booked["start_at"][:19]
     ]
@@ -887,9 +976,8 @@ def test_customer_cannot_reschedule_into_a_taken_slot(client, db, make_user, sms
         == 201
     )
 
-    refused = client.post(
-        f"/api/v1/public/appointments/{token}/reschedule", json={"start_at": taken}
-    )
+    revision = manage_info(client, token).json()["revision"]
+    refused = manage_reschedule(client, token, taken, revision)
     assert refused.status_code == 409
     db.refresh(appointment)
     assert appointment.start_at == original_start, "a refused move must change nothing"

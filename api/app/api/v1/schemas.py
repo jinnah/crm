@@ -1,9 +1,9 @@
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 # Only safe fields appear here; password hashes, token digests and other
 # internal security fields are never exposed through API schemas.
@@ -15,6 +15,8 @@ class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     role: str
+    display_name: str = ""
+    notification_phone: str | None = None
     is_active: bool
     must_change_password: bool
     last_login_at: datetime | None
@@ -54,6 +56,16 @@ class CreateUserRequest(BaseModel):
 class UpdateUserRequest(BaseModel):
     role: str | None = None
     is_active: bool | None = None
+    # Owner-managed presentation fields; empty string clears them.
+    display_name: str | None = Field(default=None, max_length=100)
+    notification_phone: str | None = Field(default=None, max_length=50)
+
+
+class UserListOut(BaseModel):
+    items: list["UserOut"]
+    total: int
+    page: int
+    page_size: int
 
 
 class AdminResetPasswordRequest(BaseModel):
@@ -70,6 +82,7 @@ class AssignableUserOut(BaseModel):
     id: uuid.UUID
     email: str
     role: str
+    display_name: str = ""
 
 
 class LeadOut(BaseModel):
@@ -171,6 +184,7 @@ class AttentionQueueOut(BaseModel):
     appointments_upcoming: list[AttentionAppointmentOut] = []
     appointment_messages_failed: list[AttentionAppointmentOut] = []
     appointment_messages_unknown: list[AttentionAppointmentOut] = []
+    voice_calls: list["AttentionVoiceCallOut"] = []
 
 
 class CustomFieldOut(BaseModel):
@@ -318,12 +332,24 @@ class PublicFormInfoOut(BaseModel):
 # --- Scheduling ----------------------------------------------------------
 
 
+def _require_aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        raise ValueError("must include a UTC offset, for example 2026-08-20T14:00:00Z")
+    return value
+
+
+AwareDatetime = Annotated[datetime, AfterValidator(_require_aware)]
+
+
 class AppointmentOut(BaseModel):
     id: uuid.UUID
     lead_id: uuid.UUID
     lead_name: str | None = None
     assigned_to: uuid.UUID | None
     assignee_email: str | None
+    # Presentation name for calendars and public surfaces; the email stays
+    # out of narrow UI blocks.
+    assignee_name: str | None = None
     subject: str
     notes: str
     start_at: datetime
@@ -331,6 +357,7 @@ class AppointmentOut(BaseModel):
     timezone: str
     status: str
     origin: str
+    revision: int
     booking_reference: str | None
     cancellation_reason: str | None
     created_at: datetime
@@ -338,7 +365,7 @@ class AppointmentOut(BaseModel):
 
 
 class CreateAppointmentRequest(BaseModel):
-    start_at: datetime
+    start_at: AwareDatetime
     duration_minutes: int | None = Field(default=None, ge=1, le=720)
     subject: str = Field(default="Appointment", max_length=200)
     notes: str = Field(default="", max_length=2000)
@@ -346,13 +373,16 @@ class CreateAppointmentRequest(BaseModel):
 
 
 class RescheduleAppointmentRequest(BaseModel):
-    start_at: datetime
+    start_at: AwareDatetime
     duration_minutes: int | None = Field(default=None, ge=1, le=720)
+    # The revision the caller saw; a stale value gets 409, never a lost update.
+    expected_revision: int = Field(ge=1)
 
 
 class AppointmentDispositionRequest(BaseModel):
     status: str
     reason: str | None = Field(default=None, max_length=500)
+    expected_revision: int = Field(ge=1)
 
 
 class AvailabilityOut(BaseModel):
@@ -381,6 +411,16 @@ class CreateBookingLinkRequest(BaseModel):
     ttl_days: int = Field(default=14, ge=1, le=90)
 
 
+class InternalBookingInfoRequest(BaseModel):
+    """Body of the fixed-path internal lookup: the capability travels in the
+    body so URLs and access logs never carry it."""
+
+    token: str = Field(min_length=16, max_length=200)
+    # Bounded paging over the configured booking window.
+    start_day: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    days: int = Field(default=14, ge=1, le=31)
+
+
 class PublicBookingInfoOut(BaseModel):
     """Everything the public booking page may know. No lead identifiers, no
     contact details, no CRM data."""
@@ -391,10 +431,15 @@ class PublicBookingInfoOut(BaseModel):
     duration_minutes: int
     timezone: str
     days: list[AvailabilityOut]
+    # The configured window in days, and where the next availability page
+    # starts (None when the window is exhausted).
+    window_days: int = 0
+    next_start_day: str | None = None
 
 
-class PublicBookingRequest(BaseModel):
-    start_at: datetime
+class InternalBookingConfirmRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=200)
+    start_at: AwareDatetime
     booking_key: str = Field(min_length=8, max_length=200)
     website: str | None = Field(default=None, max_length=100)  # honeypot
 
@@ -406,6 +451,19 @@ class PublicBookingResultOut(BaseModel):
     timezone: str
     manage_token: str | None = None
     duplicate: bool = False
+
+
+class InternalManageRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=200)
+    start_day: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    days: int = Field(default=14, ge=1, le=31)
+
+
+class InternalManageRescheduleRequest(BaseModel):
+    token: str = Field(min_length=16, max_length=200)
+    start_at: AwareDatetime
+    expected_revision: int = Field(ge=1)
+    website: str | None = Field(default=None, max_length=100)  # honeypot
 
 
 class PublicAppointmentOut(BaseModel):
@@ -424,12 +482,9 @@ class PublicAppointmentOut(BaseModel):
     timezone: str
     status: str
     can_change: bool
+    revision: int = 1
     days: list[AvailabilityOut] = []
-
-
-class PublicRescheduleRequest(BaseModel):
-    start_at: datetime
-    website: str | None = Field(default=None, max_length=100)  # honeypot
+    next_start_day: str | None = None
 
 
 class AppointmentNotificationOut(BaseModel):
@@ -451,6 +506,32 @@ class DispatchResultOut(BaseModel):
     unknown: int
     suppressed: int
     recovered: int
+
+
+class VoiceSettingsOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    voice_ack_enabled: bool
+    voice_ack_template: str
+    voice_alert_enabled: bool
+    voice_alert_template: str
+    voice_alert_recipients: str
+    voice_default_staff_id: uuid.UUID | None
+    voice_transcript_retention_enabled: bool
+    voice_transcript_retention_days: int
+
+
+class UpdateVoiceSettingsRequest(BaseModel):
+    voice_ack_enabled: bool | None = None
+    voice_ack_template: str | None = Field(default=None, max_length=1600)
+    voice_alert_enabled: bool | None = None
+    voice_alert_template: str | None = Field(default=None, max_length=1600)
+    voice_alert_recipients: str | None = None
+    voice_default_staff_id: uuid.UUID | None = None
+    # Explicit sentinel-free clearing: send clear_default_staff=true.
+    clear_default_staff: bool = False
+    voice_transcript_retention_enabled: bool | None = None
+    voice_transcript_retention_days: int | None = Field(default=None, ge=1, le=365)
 
 
 class SchedulingSettingsOut(BaseModel):
@@ -510,3 +591,141 @@ class UpdateSchedulingSettingsRequest(BaseModel):
     appointment_canceled_template: str | None = Field(default=None, max_length=1600)
     appointment_rescheduled_template: str | None = Field(default=None, max_length=1600)
     business_hours: dict[str, Any] | None = None
+
+
+# --- Voice calls ---------------------------------------------------------
+
+
+class VoiceCallCompletedRequest(BaseModel):
+    """Structured completion from the AI voice workflow.
+
+    Strict on purpose: unknown fields are rejected, every value is bounded
+    and enum-checked, and nothing here is ever treated as authority — the
+    CallSid identifies the call, it does not authorize anything.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(default="twilio", max_length=32)
+    call_sid: str = Field(min_length=8, max_length=64)
+    caller_phone: str | None = Field(default=None, max_length=32)
+    business_phone: str | None = Field(default=None, max_length=32)
+    started_at: AwareDatetime | None = None
+    answered_at: AwareDatetime | None = None
+    ended_at: AwareDatetime | None = None
+    duration_seconds: int | None = Field(default=None, ge=0, le=6 * 60 * 60)
+    call_status: str = Field(default="completed")
+    disposition: str = Field(default="", max_length=64)
+    caller_name: str = Field(default="", max_length=200)
+    caller_email: str | None = Field(default=None, max_length=320)
+    service_requested: str = Field(default="", max_length=300)
+    service_address: str = Field(default="", max_length=300)
+    preferred_callback_window: str = Field(default="", max_length=200)
+    appointment_preference: str = Field(default="", max_length=200)
+    summary: str = Field(default="", max_length=2000)
+    urgency: str = Field(default="normal")
+    requires_human_follow_up: bool = False
+    transfer_outcome: str = Field(default="none")
+    disclosure_version: str = Field(default="", max_length=64)
+    consent_result: str = Field(default="not_asked")
+    recording_sid: str | None = Field(default=None, max_length=64)
+    transcript_text: str | None = Field(default=None, max_length=20_000)
+    metadata: dict[str, str] | None = None
+
+
+class VoiceCallOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    provider: str
+    call_sid: str
+    lead_id: uuid.UUID
+    appointment_id: uuid.UUID | None
+    caller_phone: str | None
+    started_at: datetime | None
+    ended_at: datetime | None
+    duration_seconds: int | None
+    call_status: str
+    disposition: str
+    caller_name: str
+    service_requested: str
+    service_address: str
+    preferred_callback_window: str
+    appointment_preference: str
+    summary: str
+    urgency: str
+    requires_human_follow_up: bool
+    transfer_outcome: str
+    disclosure_version: str
+    consent_result: str
+    ack_state: str
+    alert_state: str
+    recording_sid: str | None
+    purged_at: datetime | None
+    created_at: datetime
+
+
+class VoiceCallCompletedOut(BaseModel):
+    call_id: uuid.UUID
+    lead_id: uuid.UUID
+    lead_created: bool
+    needs_review: bool
+    replayed: bool
+    ack_state: str
+    alert_state: str
+
+
+class VoiceAvailabilityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    call_sid: str = Field(min_length=8, max_length=64)
+    start_day: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
+    days: int = Field(default=7, ge=1, le=31)
+
+
+class VoiceAvailabilityOut(BaseModel):
+    result: str  # "ok" | "requires_human_follow_up"
+    reason: str | None = None
+    timezone: str | None = None
+    duration_minutes: int | None = None
+    staff_display_name: str | None = None
+    days: list[AvailabilityOut] = []
+    next_start_day: str | None = None
+
+
+class VoiceBookRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    call_sid: str = Field(min_length=8, max_length=64)
+    start_at: AwareDatetime
+
+
+class VoiceBookOut(BaseModel):
+    result: str  # "booked" | "slot_unavailable" | "requires_human_follow_up"
+    reason: str | None = None
+    booking_reference: str | None = None
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    timezone: str | None = None
+    replayed: bool = False
+
+
+class VoiceCleanupOut(BaseModel):
+    purged_transcripts: int
+    purged_recordings: int
+
+
+class AttentionVoiceCallOut(BaseModel):
+    id: uuid.UUID
+    lead_id: uuid.UUID
+    lead_name: str | None
+    reason: str
+    summary: str
+    occurred_at: datetime | None
+
+
+class UpdateUserAdminFieldsRequest(BaseModel):
+    """Owner-managed presentation fields, separate from login identity."""
+
+    display_name: str | None = Field(default=None, max_length=100)
+    notification_phone: str | None = Field(default=None, max_length=50)

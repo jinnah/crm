@@ -38,6 +38,14 @@ _TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 # Slot granularity when offering availability.
 SLOT_STEP_MINUTES = 15
 
+# Availability is requested in bounded pages of days; the full range is the
+# configured max_booking_days_ahead, never a hard-coded constant.
+MAX_AVAILABILITY_PAGE_DAYS = 31
+
+# Lock order, everywhere: (1) the appointment row, (2) the staff calendar
+# advisory lock. Creation without an existing appointment takes only (2).
+# Never take (1) after (2), and never hold either across a provider call.
+
 
 class SchedulingError(LeadError):
     """Rejected scheduling action; message is safe to return to the client."""
@@ -48,6 +56,41 @@ class SlotUnavailableError(SchedulingError):
 
     def __init__(self, message: str = "That time is no longer available.") -> None:
         super().__init__(message, status_code=409)
+
+
+class StaleRevisionError(SchedulingError):
+    """The caller acted on an appointment state that has since changed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This appointment changed while you were looking at it. Reload it and try again.",
+            status_code=409,
+        )
+
+
+# The only permitted lifecycle moves. Everything else is a 409, and the three
+# non-scheduled states are terminal.
+APPOINTMENT_TRANSITIONS: dict[str, frozenset[str]] = {
+    "scheduled": frozenset({"completed", "canceled", "no_show"}),
+    "completed": frozenset(),
+    "canceled": frozenset(),
+    "no_show": frozenset(),
+}
+
+
+def lock_appointment(db: Session, appointment_id: uuid.UUID) -> Appointment:
+    """Row-lock and return the appointment — lock order step (1)."""
+    appointment = db.scalar(
+        select(Appointment).where(Appointment.id == appointment_id).with_for_update()
+    )
+    if appointment is None:
+        raise SchedulingError("Appointment not found.", status_code=404)
+    return appointment
+
+
+def check_revision(appointment: Appointment, expected_revision: int) -> None:
+    if appointment.revision != expected_revision:
+        raise StaleRevisionError()
 
 
 def validate_timezone(name: str) -> str:
@@ -244,6 +287,103 @@ def assert_slot_free(
             raise SlotUnavailableError()
 
 
+def require_aware(start_at: datetime, field: str = "start_at") -> datetime:
+    """A naive timestamp is meaningless here; refuse it outright."""
+    if start_at.tzinfo is None:
+        raise SchedulingError(
+            f"{field} must include a UTC offset (for example 2026-08-20T14:00:00Z)."
+        )
+    return start_at
+
+
+def assert_staff_active(db: Session, staff_id: uuid.UUID | None) -> None:
+    if staff_id is None:
+        return
+    staff = db.get(User, staff_id)
+    if staff is None or not staff.is_active:
+        raise SchedulingError(
+            "That staff member is no longer available for booking.", status_code=409
+        )
+
+
+def assert_bookable_slot(
+    db: Session,
+    settings_row: CommunicationSettings,
+    staff_id: uuid.UUID | None,
+    start_at: datetime,
+    duration_minutes: int,
+    *,
+    exclude_id: uuid.UUID | None = None,
+    now: datetime | None = None,
+) -> None:
+    """The one bookable-slot proof for every self-service booking path.
+
+    Called while holding the staff-calendar lock, it re-derives the offered
+    slots for the requested business-local day and requires the requested
+    instant to be exactly one of them. That single membership check enforces
+    the business time zone, business hours, the slot grid, minimum notice,
+    the maximum window, buffers, existing appointments, the DST-gap policy
+    and duration fit — the same rules that produced the offer.
+    """
+    require_aware(start_at)
+    validate_timezone(settings_row.business_timezone)
+    assert_staff_active(db, staff_id)
+    if duration_minutes <= 0 or duration_minutes > 12 * 60:
+        raise SchedulingError("Appointment duration must be between 1 and 720 minutes.")
+
+    now = now or utcnow()
+    zone = ZoneInfo(settings_row.business_timezone)
+    day = start_at.astimezone(zone).date()
+    offered = available_slots(
+        db,
+        settings_row,
+        staff_id,
+        day,
+        duration_minutes=duration_minutes,
+        exclude_id=exclude_id,
+        now=now,
+    )
+    # Compare instants, not representations: any equal moment matches.
+    if not any(slot == start_at for slot in offered):
+        # Distinguish "never offered" wording for expired/off-window requests.
+        if start_at < now:
+            raise SlotUnavailableError("That time has already passed.")
+        raise SlotUnavailableError()
+
+
+def offered_days(
+    db: Session,
+    settings_row: CommunicationSettings,
+    staff_id: uuid.UUID | None,
+    duration_minutes: int,
+    *,
+    start_day: date | None = None,
+    day_count: int = 14,
+) -> tuple[list[tuple[date, list[datetime]]], date | None]:
+    """One bounded page of days with free slots, covering the configured
+    booking window. Returns (days, next_start_day) where next_start_day is
+    None once the window is exhausted."""
+    zone = ZoneInfo(settings_row.business_timezone)
+    now = utcnow()
+    today = now.astimezone(zone).date()
+    window_end = (now + timedelta(days=settings_row.max_booking_days_ahead)).astimezone(zone).date()
+
+    first = max(start_day or today, today)
+    day_count = max(1, min(day_count, MAX_AVAILABILITY_PAGE_DAYS))
+
+    days: list[tuple[date, list[datetime]]] = []
+    cursor = first
+    while cursor <= window_end and (cursor - first).days < day_count:
+        slots = available_slots(
+            db, settings_row, staff_id, cursor, duration_minutes=duration_minutes, now=now
+        )
+        if slots:
+            days.append((cursor, slots))
+        cursor += timedelta(days=1)
+    next_start = cursor if cursor <= window_end else None
+    return days, next_start
+
+
 def validate_window(
     settings_row: CommunicationSettings,
     start_at: datetime,
@@ -363,18 +503,41 @@ def reschedule_appointment(
     settings_row: CommunicationSettings,
     *,
     start_at: datetime,
+    expected_revision: int,
     duration_minutes: int | None = None,
     enforce_notice: bool = True,
-) -> Appointment:
+) -> tuple[Appointment, bool]:
+    """Move a locked appointment. Returns (appointment, changed).
+
+    The caller must already hold the appointment row lock and the staff
+    calendar lock, in that order. A stale revision whose requested time is
+    already the current time is an idempotent replay: nothing changes and no
+    second notice may be sent.
+    """
+    require_aware(start_at)
+    duration = duration_minutes or int(
+        (appointment.end_at - appointment.start_at).total_seconds() // 60
+    )
+    if appointment.revision != expected_revision:
+        already_applied = (
+            appointment.status == "scheduled"
+            and appointment.start_at == start_at
+            and appointment.end_at == start_at + timedelta(minutes=duration)
+        )
+        if already_applied:
+            return appointment, False
+        raise StaleRevisionError()
     if appointment.status != "scheduled":
         raise SchedulingError("Only a scheduled appointment can be rescheduled.", status_code=409)
+    if appointment.start_at == start_at and appointment.end_at == start_at + timedelta(
+        minutes=duration
+    ):
+        # Same time, current revision: nothing to do and nothing to send.
+        return appointment, False
     lead = db.get(Lead, appointment.lead_id)
     assert lead is not None
     if acting_user is not None:
         assert_can_manage_appointments(acting_user, lead)
-    duration = duration_minutes or int(
-        (appointment.end_at - appointment.start_at).total_seconds() // 60
-    )
     end_at = start_at + timedelta(minutes=duration)
     validate_window(settings_row, start_at, end_at, enforce_notice=enforce_notice)
     assert_slot_free(
@@ -384,6 +547,7 @@ def reschedule_appointment(
     appointment.start_at = start_at
     appointment.end_at = end_at
     appointment.timezone = settings_row.business_timezone
+    appointment.revision = appointment.revision + 1
     appointment.updated_by = acting_user.id if acting_user is not None else None
     db.flush()
     add_activity(
@@ -392,9 +556,9 @@ def reschedule_appointment(
         "appointment_rescheduled",
         f"Appointment moved to {describe_when(appointment)}.",
         acting_user=acting_user,
-        meta={"appointment_id": str(appointment.id)},
+        meta={"appointment_id": str(appointment.id), "revision": appointment.revision},
     )
-    return appointment
+    return appointment, True
 
 
 def set_disposition(
@@ -403,13 +567,23 @@ def set_disposition(
     appointment: Appointment,
     status: str,
     reason: str | None = None,
-) -> Appointment:
-    """Cancel, complete or mark no-show. History is never deleted."""
+    *,
+    expected_revision: int | None = None,
+) -> tuple[Appointment, bool]:
+    """Cancel, complete or mark no-show a locked appointment.
+
+    Returns (appointment, changed). The caller must hold the appointment row
+    lock. Concurrent dispositions therefore serialize: the first wins, an
+    identical repeat is a no-op replay, and any other late request is a 409
+    from the central transition table.
+    """
     if status not in APPOINTMENT_STATUSES or status == "scheduled":
         raise SchedulingError("Invalid appointment disposition.")
     if appointment.status == status:
-        return appointment
-    if appointment.status != "scheduled":
+        return appointment, False  # idempotent replay; no second activity
+    if expected_revision is not None and appointment.revision != expected_revision:
+        raise StaleRevisionError()
+    if status not in APPOINTMENT_TRANSITIONS.get(appointment.status, frozenset()):
         raise SchedulingError(
             f"This appointment is already {appointment.status.replace('_', ' ')}.",
             status_code=409,
@@ -421,6 +595,7 @@ def set_disposition(
 
     now = utcnow()
     appointment.status = status
+    appointment.revision = appointment.revision + 1
     appointment.updated_by = acting_user.id if acting_user is not None else None
     if status == "canceled":
         appointment.canceled_at = now
@@ -438,9 +613,9 @@ def set_disposition(
         f"appointment_{status}",
         f"Appointment {labels[status]}: {appointment.subject} on {describe_when(appointment)}.",
         acting_user=acting_user,
-        meta={"appointment_id": str(appointment.id)},
+        meta={"appointment_id": str(appointment.id), "revision": appointment.revision},
     )
-    return appointment
+    return appointment, True
 
 
 def visible_appointments_query(user: User):

@@ -724,3 +724,340 @@ def test_concurrent_notification_claims_contact_the_provider_once(pg_session_fac
     assert row.state == "sent"
     assert row.outbound_message_id is not None
     check.close()
+
+
+# --- corrective-milestone races ------------------------------------------
+
+
+def test_concurrent_same_key_bookings_return_one_appointment_and_capability(
+    pg_session_factory,
+) -> None:
+    """Two racing submissions of one booking key: one appointment, and both
+    callers can be handed the same working manage capability."""
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from app.config import get_settings
+    from app.models import Appointment, BookingLink, Lead, utcnow
+    from app.security.tokens import digest_token, generate_token
+    from app.services import booking as booking_service
+    from app.services import scheduling
+
+    settings = get_settings()
+    setup = pg_session_factory()
+    staff = make_owner(setup, "tech@example.com")
+    lead = seed_appointment_lead(setup, "+15550600020")
+    seed_scheduling_settings(setup)
+    link = BookingLink(
+        lead_id=lead.id,
+        assigned_to=staff.id,
+        token_digest=digest_token(generate_token(), settings.session_token_pepper),
+        expires_at=utcnow() + timedelta(days=7),
+    )
+    setup.add(link)
+    setup.commit()
+    link_id = link.id
+    setup.close()
+
+    start = (utcnow() + timedelta(days=3)).replace(microsecond=0, minute=0, second=0)
+    booking_key = "race-booking-key-0001"
+    reference_digest = digest_token(
+        f"booking:{link_id}:{booking_key}", settings.session_token_pepper
+    )
+    barrier = threading.Barrier(2)
+    outcomes: list[tuple[str, str | None]] = []
+    errors: list[Exception] = []
+
+    def book() -> None:
+        session = pg_session_factory()
+        try:
+            from app.services.messaging import get_settings_row
+
+            row = get_settings_row(session)
+            target = session.get(Lead, lead.id)
+            barrier.wait(timeout=5)
+            scheduling.lock_staff_calendar(session, staff.id)
+            existing = session.scalar(
+                select(Appointment).where(Appointment.booking_key_digest == reference_digest)
+            )
+            if existing is not None:
+                raw, digest = booking_service.derive_manage_token(settings, link_id, booking_key)
+                session.commit()
+                outcomes.append(("replay", raw if digest == existing.manage_token_digest else None))
+                return
+            raw, digest = booking_service.derive_manage_token(settings, link_id, booking_key)
+            appointment = scheduling.create_appointment(
+                session,
+                None,
+                target,
+                row,
+                start_at=start,
+                duration_minutes=60,
+                staff_id=staff.id,
+                origin="customer",
+                booking_reference=booking_service.new_booking_reference(),
+                manage_token_digest=digest,
+            )
+            appointment.booking_key_digest = reference_digest
+            session.commit()
+            outcomes.append(("created", raw))
+        except Exception as error:
+            session.rollback()
+            errors.append(error)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=book) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert sorted(kind for kind, _ in outcomes) == ["created", "replay"]
+    capabilities = {raw for _, raw in outcomes}
+    assert len(capabilities) == 1 and None not in capabilities, (
+        "both callers must receive the same working capability"
+    )
+    check = pg_session_factory()
+    assert check.scalar(func.count(Appointment.id)) == 1
+    check.close()
+
+
+def _seed_claimable_reminder(pg_session_factory, phone: str):
+    """One scheduled appointment with a due reminder, ready to claim."""
+    from datetime import timedelta
+
+    from app.models import Appointment, AppointmentNotification, utcnow
+
+    setup = pg_session_factory()
+    seed_scheduling_settings(setup)
+    lead = seed_appointment_lead(setup, phone)
+    start = utcnow() + timedelta(days=2)
+    appointment = Appointment(
+        lead_id=lead.id,
+        subject="Race target",
+        start_at=start,
+        end_at=start + timedelta(hours=1),
+        timezone="UTC",
+        status="scheduled",
+        origin="staff",
+        revision=1,
+    )
+    setup.add(appointment)
+    setup.commit()
+    setup.add(
+        AppointmentNotification(
+            appointment_id=appointment.id,
+            type="reminder",
+            occurrence="r1:1",
+            schedule_revision=1,
+            scheduled_at=utcnow() - timedelta(minutes=1),
+            state="pending",
+            idempotency_key_digest=f"digest-race-{phone}",
+        )
+    )
+    setup.commit()
+    appointment_id = appointment.id
+    setup.close()
+    return appointment_id
+
+
+def test_claim_versus_cancel_never_sends_an_obsolete_reminder(pg_session_factory) -> None:
+    """A cancellation racing the scheduler: whichever wins, the customer never
+    receives a reminder for an appointment that was canceled first."""
+    from app.config import get_settings
+    from app.models import AppointmentNotification
+    from app.services import appointment_notifications as notifications
+    from app.services import scheduling
+
+    appointment_id = _seed_claimable_reminder(pg_session_factory, "+15550600021")
+    settings = get_settings()
+    sender = _CountingSender(delay=0.4)
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def dispatch() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            notifications.dispatch_due(session, settings, sender)
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    def cancel() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            appointment = scheduling.lock_appointment(session, appointment_id)
+            appointment, changed = scheduling.set_disposition(
+                session, None, appointment, "canceled", "race cancel"
+            )
+            if changed:
+                notifications.suppress_pending(
+                    session, appointment_id, ("reminder", "confirmation")
+                )
+            session.commit()
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=dispatch), threading.Thread(target=cancel)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors, errors
+
+    check = pg_session_factory()
+    row = check.scalar(select(AppointmentNotification))
+    # Either the reminder was suppressed before sending, or delivery began
+    # before the cancel landed — in which case the deliver-side guard checked
+    # a still-scheduled appointment. What must NEVER happen is a send that
+    # starts after the cancellation was durable.
+    if sender.sent:
+        assert row.state == "sent"
+        assert row.attempted_at is not None
+    else:
+        assert row.state == "suppressed"
+        assert row.attempted_at is None, "a suppressed reminder must never have started sending"
+    check.close()
+
+
+def test_claim_versus_reschedule_never_sends_an_old_time(pg_session_factory) -> None:
+    """A reschedule racing the scheduler: a reminder describing the old time
+    is suppressed, and only content for the current revision may send."""
+    from datetime import timedelta
+
+    from app.config import get_settings
+    from app.models import AppointmentNotification, utcnow
+    from app.services import appointment_notifications as notifications
+    from app.services import scheduling
+    from app.services.messaging import get_settings_row
+
+    appointment_id = _seed_claimable_reminder(pg_session_factory, "+15550600022")
+    settings = get_settings()
+    sender = _CountingSender(delay=0.4)
+    barrier = threading.Barrier(2)
+    errors: list[Exception] = []
+
+    def dispatch() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            notifications.dispatch_due(session, settings, sender)
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    def reschedule() -> None:
+        session = pg_session_factory()
+        try:
+            row = get_settings_row(session)
+            barrier.wait(timeout=5)
+            appointment = scheduling.lock_appointment(session, appointment_id)
+            scheduling.lock_staff_calendar(session, appointment.assigned_to)
+            appointment, changed = scheduling.reschedule_appointment(
+                session,
+                None,
+                appointment,
+                row,
+                start_at=utcnow() + timedelta(days=4),
+                expected_revision=1,
+                enforce_notice=False,
+            )
+            if changed:
+                notifications.suppress_pending(session, appointment_id, ("reminder",))
+            session.commit()
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=dispatch), threading.Thread(target=reschedule)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not errors, errors
+
+    check = pg_session_factory()
+    row = check.scalar(
+        select(AppointmentNotification).where(AppointmentNotification.occurrence == "r1:1")
+    )
+    if sender.sent:
+        # Delivery won the race: the locks serialize it against the
+        # reschedule, so the revision it verified was still current when the
+        # message content was produced.
+        assert row.state == "sent"
+    else:
+        assert row.state == "suppressed"
+        assert row.attempted_at is None
+    check.close()
+
+
+def test_concurrent_duplicate_callsid_produces_one_record(pg_session_factory) -> None:
+    from sqlalchemy import func
+
+    from app.api.v1.schemas import VoiceCallCompletedRequest
+    from app.config import get_settings
+    from app.models import Lead, LeadActivity, VoiceCall
+    from app.services.voice import process_voice_completion
+
+    setup = pg_session_factory()
+    seed_scheduling_settings(setup)
+    setup.close()
+
+    payload = VoiceCallCompletedRequest(
+        call_sid="CApgrace0000000000000000000001",
+        caller_phone="+15550600023",
+        caller_name="PG Caller",
+        summary="Race summary",
+    )
+    settings = get_settings()
+    barrier = threading.Barrier(2)
+    results = []
+    errors: list[Exception] = []
+
+    def submit() -> None:
+        session = pg_session_factory()
+        try:
+            barrier.wait(timeout=5)
+            result = process_voice_completion(session, payload, settings)
+            results.append((str(result.call.id), result.replayed))
+        except Exception as error:
+            errors.append(error)
+            session.rollback()
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=submit) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert len(results) == 2
+    assert results[0][0] == results[1][0], "both must resolve to one call record"
+    assert sorted(replayed for _, replayed in results) == [False, True]
+
+    check = pg_session_factory()
+    assert check.scalar(func.count(VoiceCall.id)) == 1
+    assert (
+        check.scalar(
+            select(func.count()).select_from(LeadActivity).where(LeadActivity.type == "voice_call")
+        )
+        == 1
+    )
+    assert check.scalar(func.count(Lead.id)) == 1
+    check.close()

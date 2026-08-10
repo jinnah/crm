@@ -17,8 +17,11 @@ from app.api.v1.schemas import (
     SchedulingSettingsOut,
     UpdateCommunicationSettingsRequest,
     UpdateSchedulingSettingsRequest,
+    UpdateVoiceSettingsRequest,
+    VoiceSettingsOut,
 )
 from app.services import branding, messaging, scheduling
+from app.services import voice as voice_service
 from app.services.leads import LeadError
 from app.services.rate_limit import RateLimiter
 
@@ -259,3 +262,58 @@ def public_branding(db: DbDep) -> BrandingOut:
     row = messaging.get_settings_row(db)
     db.commit()
     return _branding_out(row)
+
+
+# --- Voice calls ---------------------------------------------------------
+
+
+@router.get(
+    "/voice",
+    response_model=VoiceSettingsOut,
+    dependencies=[Depends(check_origin)],
+)
+def get_voice_settings(user: FullyAuthedUserDep, db: DbDep) -> VoiceSettingsOut:
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="You are not allowed to view these settings.")
+    row = messaging.get_settings_row(db)
+    db.commit()
+    return VoiceSettingsOut.model_validate(row)
+
+
+@router.patch(
+    "/voice",
+    response_model=VoiceSettingsOut,
+    dependencies=[Depends(check_origin), Depends(check_csrf)],
+)
+def update_voice_settings(
+    body: UpdateVoiceSettingsRequest, user: FullyAuthedUserDep, db: DbDep
+) -> VoiceSettingsOut:
+    if user.role != "owner":
+        raise HTTPException(status_code=403, detail="You are not allowed to change these settings.")
+    row = messaging.get_settings_row(db)
+    changes = body.model_dump(exclude_unset=True, exclude={"clear_default_staff"})
+    try:
+        for field in ("voice_ack_template", "voice_alert_template"):
+            if field in changes:
+                changes[field] = voice_service.validate_voice_template(changes[field])
+        if "voice_alert_recipients" in changes and changes["voice_alert_recipients"] not in (
+            "business",
+            "assigned",
+            "both",
+        ):
+            raise LeadError("Alert recipients must be business, assigned or both.")
+        if changes.get("voice_default_staff_id") is not None:
+            from app.models import User as UserModel
+
+            staff = db.get(UserModel, changes["voice_default_staff_id"])
+            if staff is None or not staff.is_active:
+                raise LeadError("The default voice-booking staff member must be active.")
+        for field, value in changes.items():
+            setattr(row, field, value)
+        if body.clear_default_staff:
+            row.voice_default_staff_id = None
+    except LeadError as error:
+        db.rollback()
+        raise HTTPException(status_code=error.status_code, detail=error.message) from error
+    db.commit()
+    return VoiceSettingsOut.model_validate(row)

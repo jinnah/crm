@@ -53,6 +53,16 @@ class Settings(BaseSettings):
     # the endpoint (all requests rejected). Never exposed to the browser.
     inbound_api_key: str = ""
 
+    # Dedicated rotatable key for the voice-ingestion endpoints. Falls back to
+    # the inbound key when unset; with neither configured the endpoints fail
+    # closed. Never exposed to the browser.
+    voice_api_key: str = ""
+
+    # Server-only credential the Next.js BFF routes present on the internal
+    # capability endpoints. Empty disables those endpoints entirely (fail
+    # closed). NEVER exposed via NEXT_PUBLIC_* or any response.
+    internal_bff_key: str = ""
+
     # Outbound SMS: the CRM calls this authenticated n8n workflow, which holds
     # the Twilio credentials. No provider secrets are stored in PostgreSQL.
     n8n_send_url: str = ""
@@ -96,6 +106,12 @@ def validate_production_settings(settings: Settings) -> None:
         problems.append("FRONTEND_URL must be an https origin in production")
     if settings.inbound_api_key and len(settings.inbound_api_key) < 32:
         problems.append("INBOUND_API_KEY must be at least 32 characters when set")
+    if settings.voice_api_key and len(settings.voice_api_key) < 32:
+        problems.append("VOICE_API_KEY must be at least 32 characters when set")
+    if settings.internal_bff_key and (
+        len(settings.internal_bff_key) < 32 or settings.internal_bff_key.startswith("dev-")
+    ):
+        problems.append("INTERNAL_BFF_KEY must be a generated secret of at least 32 characters")
     if problems:
         raise RuntimeError("Unsafe production configuration: " + "; ".join(problems))
 

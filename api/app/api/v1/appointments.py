@@ -49,9 +49,11 @@ def _http(error: LeadError) -> HTTPException:
 
 def serialize(db: Session, appointment: Appointment) -> AppointmentOut:
     assignee_email = None
+    assignee_name = None
     if appointment.assigned_to is not None:
         staff = db.get(User, appointment.assigned_to)
         assignee_email = staff.email if staff is not None else None
+        assignee_name = (staff.display_name or None) if staff is not None else None
     lead = db.get(Lead, appointment.lead_id)
     return AppointmentOut(
         id=appointment.id,
@@ -59,6 +61,7 @@ def serialize(db: Session, appointment: Appointment) -> AppointmentOut:
         lead_name=(lead.name or lead.email or lead.phone) if lead is not None else None,
         assigned_to=appointment.assigned_to,
         assignee_email=assignee_email,
+        assignee_name=assignee_name,
         subject=appointment.subject,
         notes=appointment.notes,
         start_at=appointment.start_at,
@@ -66,6 +69,7 @@ def serialize(db: Session, appointment: Appointment) -> AppointmentOut:
         timezone=appointment.timezone,
         status=appointment.status,
         origin=appointment.origin,
+        revision=appointment.revision,
         booking_reference=appointment.booking_reference,
         cancellation_reason=appointment.cancellation_reason,
         created_at=appointment.created_at,
@@ -238,29 +242,31 @@ def reschedule(
     try:
         appointment = scheduling.get_visible_appointment(db, user, appointment_id)
         settings_row = messaging.get_settings_row(db)
+        # Documented lock order: (1) the appointment row, (2) the staff calendar.
+        appointment = scheduling.lock_appointment(db, appointment.id)
         scheduling.lock_staff_calendar(db, appointment.assigned_to)
-        generation = str(int(appointment.updated_at.timestamp()))
-        scheduling.reschedule_appointment(
+        appointment, changed = scheduling.reschedule_appointment(
             db,
             user,
             appointment,
             settings_row,
             start_at=body.start_at,
+            expected_revision=body.expected_revision,
             duration_minutes=body.duration_minutes,
         )
-        # Obsolete reminders never go out; a fresh set is queued for the new time.
-        notifications.suppress_pending(db, appointment.id, ("reminder",))
-        notifications.queue_immediate(
-            db, appointment, settings, type_="rescheduled", occurrence=generation
-        )
-        notifications.schedule_for_appointment(
-            db,
-            appointment,
-            settings_row,
-            settings,
-            include_confirmation=False,
-            generation=generation,
-        )
+        if changed:
+            # Obsolete reminders never go out; a fresh set covers the new time.
+            notifications.suppress_pending(db, appointment.id, ("reminder",))
+            notifications.queue_immediate(
+                db,
+                appointment,
+                settings,
+                type_="rescheduled",
+                occurrence=f"r{appointment.revision}",
+            )
+            notifications.schedule_for_appointment(
+                db, appointment, settings_row, settings, include_confirmation=False
+            )
     except LeadError as error:
         db.rollback()
         raise _http(error) from error
@@ -283,14 +289,24 @@ def set_disposition(
     try:
         appointment = scheduling.get_visible_appointment(db, user, appointment_id)
         settings_row = messaging.get_settings_row(db)
-        scheduling.set_disposition(db, user, appointment, body.status, body.reason)
-        if body.status == "canceled":
+        # Lock the appointment row: concurrent dispositions serialize here, so
+        # exactly one final state and one activity can ever be produced.
+        appointment = scheduling.lock_appointment(db, appointment.id)
+        appointment, changed = scheduling.set_disposition(
+            db,
+            user,
+            appointment,
+            body.status,
+            body.reason,
+            expected_revision=body.expected_revision,
+        )
+        if changed and body.status == "canceled":
             notifications.suppress_pending(db, appointment.id, ("reminder", "confirmation"))
             if settings_row.appointment_confirmation_enabled:
                 notifications.queue_immediate(
                     db, appointment, settings, type_="canceled", occurrence="1"
                 )
-        else:
+        elif changed:
             notifications.suppress_pending(db, appointment.id, ("reminder",))
     except LeadError as error:
         db.rollback()

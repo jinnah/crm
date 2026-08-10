@@ -24,7 +24,57 @@ def test_owner_can_list_users(client, make_user) -> None:
     headers = owner_session(client, make_user)
     response = client.get("/api/v1/users", headers=headers)
     assert response.status_code == 200
-    assert [u["email"] for u in response.json()] == ["owner@example.com"]
+    body = response.json()
+    assert [u["email"] for u in body["items"]] == ["owner@example.com"]
+    assert body["total"] == 1
+
+
+def test_user_listing_supports_search_and_filters(client, make_user) -> None:
+    headers = owner_session(client, make_user)
+    make_user(email="alice@example.com", role="manager")
+    make_user(email="bob@example.com", role="team_member", is_active=False)
+
+    by_query = client.get("/api/v1/users?query=alice", headers=headers).json()
+    assert [u["email"] for u in by_query["items"]] == ["alice@example.com"]
+
+    by_role = client.get("/api/v1/users?role=team_member", headers=headers).json()
+    assert [u["email"] for u in by_role["items"]] == ["bob@example.com"]
+
+    by_status = client.get("/api/v1/users?status=inactive", headers=headers).json()
+    assert [u["email"] for u in by_status["items"]] == ["bob@example.com"]
+
+    paged = client.get("/api/v1/users?page=1&page_size=2", headers=headers).json()
+    assert paged["total"] == 3 and len(paged["items"]) == 2
+
+
+def test_owner_manages_display_name_and_notification_phone(client, make_user) -> None:
+    headers = owner_session(client, make_user)
+    created = client.post(
+        "/api/v1/users",
+        json={
+            "email": "tech@example.com",
+            "role": "team_member",
+            "temporary_password": TEMP_PASSWORD,
+        },
+        headers=headers,
+    ).json()
+
+    updated = client.patch(
+        f"/api/v1/users/{created['id']}",
+        json={"display_name": "Sam Tech", "notification_phone": "+15550107000"},
+        headers=headers,
+    )
+    assert updated.status_code == 200
+    assert updated.json()["display_name"] == "Sam Tech"
+    assert updated.json()["notification_phone"] == "+15550107000"
+
+    # A number that is not international format is refused, never guessed at.
+    rejected = client.patch(
+        f"/api/v1/users/{created['id']}",
+        json={"notification_phone": "555-0100"},
+        headers=headers,
+    )
+    assert rejected.status_code == 400
 
 
 def test_non_owners_are_rejected(client, make_user) -> None:

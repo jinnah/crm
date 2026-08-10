@@ -78,6 +78,7 @@ def _create(
             appointment_id=appointment.id,
             type=type_,
             occurrence=occurrence,
+            schedule_revision=appointment.revision,
             scheduled_at=scheduled_at,
             state="pending",
             idempotency_key_digest=digest,
@@ -99,9 +100,13 @@ def schedule_for_appointment(
     settings: Settings,
     *,
     include_confirmation: bool = True,
-    generation: str = "1",
 ) -> list[AppointmentNotification]:
-    """Queue the confirmation and reminders for a scheduled appointment."""
+    """Queue the confirmation and reminders for a scheduled appointment.
+
+    Occurrences are keyed by the durable schedule revision, so a reschedule
+    produces a fresh reminder set while an identical replay collides with the
+    unique constraint and adds nothing.
+    """
     created: list[AppointmentNotification] = []
     if include_confirmation and settings_row.appointment_confirmation_enabled:
         row = _create(
@@ -128,7 +133,7 @@ def schedule_for_appointment(
                 appointment,
                 settings,
                 type_="reminder",
-                occurrence=f"{generation}:{index}",
+                occurrence=f"r{appointment.revision}:{index}",
                 scheduled_at=due,
             )
             if row is not None:
@@ -139,17 +144,21 @@ def schedule_for_appointment(
 def suppress_pending(
     db: Session, appointment_id: uuid.UUID, types: tuple[str, ...] = ("reminder",)
 ) -> int:
-    """Stop obsolete notifications that have not been sent yet.
+    """Stop obsolete notifications whose provider submission has not begun.
 
-    Only `pending` rows are touched: anything already claimed or sent stays as
-    history, so suppression can never rewrite what a customer received.
+    Covers `pending` rows and rows a scheduler has claimed but not yet
+    started sending (state=claimed with no attempted_at). The guard is
+    row-atomic against deliver(): delivery flips attempted_at only while the
+    state is still `claimed`, so exactly one side wins and a message that
+    genuinely started sending is never rewritten.
     """
     result = db.execute(
         update(AppointmentNotification)
         .where(
             AppointmentNotification.appointment_id == appointment_id,
             AppointmentNotification.type.in_(types),
-            AppointmentNotification.state == "pending",
+            AppointmentNotification.state.in_(("pending", "claimed")),
+            AppointmentNotification.attempted_at.is_(None),
         )
         .values(state="suppressed", updated_at=utcnow())
     )
@@ -260,6 +269,18 @@ def deliver(
     # A cancellation or reschedule may have landed after this row was claimed.
     if notification.type == "reminder" and appointment.status != "scheduled":
         _finish(db, notification, "suppressed", detail="Appointment is no longer scheduled.")
+        db.commit()
+        return "suppressed"
+    if notification.type == "reminder" and appointment.revision != notification.schedule_revision:
+        # The appointment moved after this reminder was written: its content
+        # describes an old time and must never reach the customer.
+        _finish(
+            db,
+            notification,
+            "suppressed",
+            detail="The appointment was rescheduled after this reminder was queued.",
+        )
+        db.commit()
         return "suppressed"
 
     lead = db.get(Lead, appointment.lead_id)
@@ -284,9 +305,25 @@ def deliver(
     template = getattr(settings_row, TEMPLATE_FIELDS[notification.type])
     body = render_appointment_template(template, appointment, lead, settings_row, staff_name)
 
-    notification.attempted_at = utcnow()
-    db.flush()
+    # Marking the attempt is a guarded, row-atomic update: it succeeds only
+    # while the row is still `claimed`. If a concurrent cancel or reschedule
+    # suppressed the row after we loaded it, rowcount is 0 and nothing is
+    # sent. Once this commits, provider submission has genuinely begun and an
+    # ambiguous outcome stays `unknown` forever — never auto-retried.
+    started = db.execute(
+        update(AppointmentNotification)
+        .where(
+            AppointmentNotification.id == notification.id,
+            AppointmentNotification.state == "claimed",
+            AppointmentNotification.attempted_at.is_(None),
+        )
+        .values(attempted_at=utcnow(), updated_at=utcnow())
+    )
     db.commit()  # never hold a transaction open across the provider call
+    if int(started.rowcount or 0) == 0:
+        db.refresh(notification)
+        return notification.state if notification.state == "suppressed" else "suppressed"
+    db.refresh(notification)
 
     message = messaging.create_and_send(
         db,

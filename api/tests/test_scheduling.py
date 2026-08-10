@@ -375,19 +375,27 @@ def test_lifecycle_and_history_on_archived_lead(client, db, make_user, sms_sende
 
     done = client.post(
         f"/api/v1/appointments/{appointment['id']}/disposition",
-        json={"status": "completed"},
+        json={"status": "completed", "expected_revision": appointment["revision"]},
         headers=owner,
     )
     assert done.status_code == 200 and done.json()["status"] == "completed"
-    # A second disposition on a settled appointment is refused.
+    # A second, different disposition on a settled appointment is refused —
+    # whether it carries the new revision (transition table) or a stale one.
     assert (
         client.post(
             f"/api/v1/appointments/{appointment['id']}/disposition",
-            json={"status": "no_show"},
+            json={"status": "no_show", "expected_revision": done.json()["revision"]},
             headers=owner,
         ).status_code
         == 409
     )
+    # Repeating the SAME disposition is an idempotent replay, not an error.
+    replay = client.post(
+        f"/api/v1/appointments/{appointment['id']}/disposition",
+        json={"status": "completed", "expected_revision": done.json()["revision"]},
+        headers=owner,
+    )
+    assert replay.status_code == 200 and replay.json()["revision"] == done.json()["revision"]
 
     # History stays readable once the lead is archived.
     client.post(f"/api/v1/leads/{lead['id']}/archive", headers=owner)

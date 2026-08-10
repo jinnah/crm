@@ -1,0 +1,621 @@
+{
+  "name": "Voice Call Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-complete",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-voice-complete-post",
+      "name": "Voice Completion Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "voice-complete-post"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Structured completion from the AI voice workflow (provider-neutral).\n// Validates the shared secret, maps the documented fields onto the CRM\n// schema, and emits nothing sensitive beyond the normalized event itself.\nconst crypto = require('crypto');\nconst item = $input.all()[0];\nconst body = item.json.body || {};\nconst headers = item.json.headers || {};\n\nconst expected = $env.VOICE_INTAKE_SECRET || '';\nconst provided = headers['x-voice-secret'] || '';\nif (!expected || !provided || provided.length !== expected.length ||\n    !crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(expected))) {\n  return [{ json: { reject: true, status: 401, message: 'unauthorized' } }];\n}\n\nconst sid = String(body.call_sid || '').trim();\nif (sid.length < 8 || sid.length > 64) {\n  return [{ json: { reject: true, status: 422, message: 'call_sid is required' } }];\n}\n\nfunction bounded(value, limit) {\n  return value === undefined || value === null ? '' : String(value).slice(0, limit);\n}\nfunction boundedOrNull(value, limit) {\n  const text = bounded(value, limit);\n  return text === '' ? null : text;\n}\nconst oneOf = (value, allowed, fallback) =>\n  allowed.includes(value) ? value : fallback;\n\n// Only the documented fields travel onward; anything else the upstream\n// workflow sends is dropped here rather than reaching the CRM.\nconst event = {\n  provider: bounded(body.provider, 32) || 'twilio',\n  call_sid: sid,\n  caller_phone: boundedOrNull(body.caller_phone, 32),\n  business_phone: boundedOrNull(body.business_phone, 32),\n  started_at: boundedOrNull(body.started_at, 40),\n  answered_at: boundedOrNull(body.answered_at, 40),\n  ended_at: boundedOrNull(body.ended_at, 40),\n  duration_seconds: Number.isFinite(Number(body.duration_seconds))\n    ? Math.max(0, Math.min(21600, Math.trunc(Number(body.duration_seconds))))\n    : null,\n  call_status: oneOf(body.call_status,\n    ['completed', 'no_answer', 'abandoned', 'transferred', 'failed'], 'completed'),\n  disposition: bounded(body.disposition, 64),\n  caller_name: bounded(body.caller_name, 200),\n  caller_email: boundedOrNull(body.caller_email, 320),\n  service_requested: bounded(body.service_requested, 300),\n  service_address: bounded(body.service_address, 300),\n  preferred_callback_window: bounded(body.preferred_callback_window, 200),\n  appointment_preference: bounded(body.appointment_preference, 200),\n  summary: bounded(body.summary, 2000),\n  urgency: oneOf(body.urgency, ['normal', 'urgent'], 'normal'),\n  requires_human_follow_up: body.requires_human_follow_up === true,\n  transfer_outcome: oneOf(body.transfer_outcome, ['none', 'completed', 'failed'], 'none'),\n  disclosure_version: bounded(body.disclosure_version, 64),\n  consent_result: oneOf(body.consent_result, ['granted', 'declined', 'not_asked'], 'not_asked'),\n  recording_sid: boundedOrNull(body.recording_sid, 64),\n  transcript_text: boundedOrNull(body.transcript_text, 20000),\n};\n\nreturn [{ json: { reject: false, event } }];\n"
+      },
+      "id": "code-normalize",
+      "name": "Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"reject\"] }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "if-reject?",
+      "name": "Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({status: 'ok', lead_id: $json.lead_id, call_id: $json.call_id, replayed: $json.replayed}) }}"
+      },
+      "id": "respond-ok",
+      "name": "Respond OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        640,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-failure",
+      "name": "Respond Failure",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        640,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({error: $json.message || 'rejected'}) }}",
+        "options": {
+          "responseCode": "={{ $json.status || 403 }}"
+        }
+      },
+      "id": "respond-respond-reject",
+      "name": "Respond Reject",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        440,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/voice-calls/completed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_VOICE_API_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Normalize').first().json.event) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "crm-voice-1",
+      "name": "CRM Voice Write",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        660,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Selective retry on EVERY attempt: only network errors, timeouts,\n// 429 and 5xx retry. A permanent 4xx (including the 409 identity\n// conflict) stops immediately. Output carries the outcome only.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  const body = response.body && typeof response.body === 'object' ? response.body : {};\n  return [{ json: { outcome: 'success', lead_id: body.lead_id,\n    call_id: body.call_id, replayed: body.replayed === true } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'CRM rejected the call completion (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry' } }];\n"
+      },
+      "id": "code-classify-voice",
+      "name": "Classify Voice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-voice-1",
+      "name": "Route Voice",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1060,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/voice-calls/completed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_VOICE_API_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Normalize').first().json.event) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "crm-voice-2",
+      "name": "CRM Voice Write 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1280,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Selective retry on EVERY attempt: only network errors, timeouts,\n// 429 and 5xx retry. A permanent 4xx (including the 409 identity\n// conflict) stops immediately. Output carries the outcome only.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  const body = response.body && typeof response.body === 'object' ? response.body : {};\n  return [{ json: { outcome: 'success', lead_id: body.lead_id,\n    call_id: body.call_id, replayed: body.replayed === true } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'CRM rejected the call completion (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry' } }];\n"
+      },
+      "id": "code-classify-voice-2",
+      "name": "Classify Voice 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-voice-2",
+      "name": "Route Voice 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/voice-calls/completed",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_VOICE_API_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('Normalize').first().json.event) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 20000
+        }
+      },
+      "id": "crm-voice-3",
+      "name": "CRM Voice Write 3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1900,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Selective retry on EVERY attempt: only network errors, timeouts,\n// 429 and 5xx retry. A permanent 4xx (including the 409 identity\n// conflict) stops immediately. Output carries the outcome only.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  const body = response.body && typeof response.body === 'object' ? response.body : {};\n  return [{ json: { outcome: 'success', lead_id: body.lead_id,\n    call_id: body.call_id, replayed: body.replayed === true } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'CRM rejected the call completion (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'exhausted', status: 503, message: 'CRM unavailable after 3 attempts' } }];\n"
+      },
+      "id": "code-classify-voice-3",
+      "name": "Classify Voice 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2100,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-voice-3",
+      "name": "Route Voice 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2300,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Voice Completion Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize": {
+      "main": [
+        [
+          {
+            "node": "Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Voice Write": {
+      "main": [
+        [
+          {
+            "node": "Classify Voice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Voice": {
+      "main": [
+        [
+          {
+            "node": "Route Voice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Voice": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Voice Write 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Voice Write 2": {
+      "main": [
+        [
+          {
+            "node": "Classify Voice 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Voice 2": {
+      "main": [
+        [
+          {
+            "node": "Route Voice 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Voice 2": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Voice Write 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Voice Write 3": {
+      "main": [
+        [
+          {
+            "node": "Classify Voice 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Voice 3": {
+      "main": [
+        [
+          {
+            "node": "Route Voice 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Voice 3": {
+      "main": [
+        [
+          {
+            "node": "Respond OK",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Failure",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reject?": {
+      "main": [
+        [
+          {
+            "node": "Respond Reject",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Voice Write",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "active": false,
+  "pinData": {}
+}

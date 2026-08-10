@@ -18,6 +18,7 @@ from app.api.v1.schemas import (
     AssignableUserOut,
     AssignLeadRequest,
     AttentionQueueOut,
+    AttentionVoiceCallOut,
     CreateLeadRequest,
     LeadListOut,
     LeadOut,
@@ -25,12 +26,14 @@ from app.api.v1.schemas import (
     OutboundMessageOut,
     SendMessageRequest,
     UpdateLeadRequest,
+    VoiceCallOut,
 )
-from app.models import Lead, LeadActivity, OutboundMessage, User, utcnow
+from app.models import Lead, LeadActivity, OutboundMessage, User, VoiceCall, utcnow
 from app.services import custom_fields as custom_field_service
 from app.services import leads as lead_service
 from app.services import messaging
 from app.services.leads import LeadError
+from app.services.voice import call_attention_reason
 
 router = APIRouter(
     prefix="/leads",
@@ -126,6 +129,7 @@ def attention_queue(user: FullyAuthedUserDep, db: DbDep) -> AttentionQueueOut:
         unassigned=_serialize_many(db, groups["unassigned"]),
         needs_review=_serialize_many(db, groups["needs_review"]),
         unresponded=_serialize_many(db, groups["unresponded"]),
+        voice_calls=_voice_attention(db, user),
         **_appointment_attention(db, user),
     )
 
@@ -170,6 +174,73 @@ def _appointment_attention(db: Session, user: User) -> dict:
         "appointment_messages_failed": [item for item in failed if item is not None],
         "appointment_messages_unknown": [item for item in unknown if item is not None],
     }
+
+
+def _voice_attention(db: Session, user: User) -> list:
+    """Voice calls that still need a person, with one concise reason each.
+
+    An item stays visible until the underlying condition clears: a follow-up
+    or urgent call until the lead gets its first human response, a conflict
+    or ambiguity until review is cleared, a missing number until one is
+    recorded, and messaging problems as long as the state stands.
+    """
+    query = (
+        select(VoiceCall)
+        .join(Lead, Lead.id == VoiceCall.lead_id)
+        .where(Lead.archived_at.is_(None))
+        .order_by(VoiceCall.created_at.desc())
+        .limit(200)
+    )
+    if not lead_service.can_manage_leads(user):
+        query = query.where(Lead.assigned_to == user.id)
+
+    items = []
+    for call in db.scalars(query):
+        reason = call_attention_reason(call)
+        if reason is None:
+            continue
+        lead = db.get(Lead, call.lead_id)
+        if lead is None:
+            continue
+        needs_person = (
+            call.completion_conflict
+            or (call.transfer_outcome == "failed" and lead.first_response_at is None)
+            or (call.urgency == "urgent" and lead.first_response_at is None)
+            or (call.requires_human_follow_up and lead.first_response_at is None)
+            or (not call.caller_phone and lead.email is None and lead.phone is None)
+            or call.ack_state in ("failed", "unknown")
+            or call.alert_state in ("failed", "unknown", "no_destination")
+        )
+        if not needs_person:
+            continue
+        items.append(
+            AttentionVoiceCallOut(
+                id=call.id,
+                lead_id=call.lead_id,
+                lead_name=(lead.name or lead.email or lead.phone),
+                reason=reason,
+                summary=call.summary[:200],
+                occurred_at=call.started_at or call.created_at,
+            )
+        )
+    return items
+
+
+@router.get("/{lead_id}/voice-calls", response_model=list[VoiceCallOut])
+def lead_voice_calls(lead_id: uuid.UUID, user: FullyAuthedUserDep, db: DbDep) -> list[VoiceCallOut]:
+    """Call history for one lead, newest first, following lead access rules.
+    Never includes transcript text — the summary is the timeline surface."""
+    try:
+        lead = lead_service.get_visible_lead(db, user, lead_id)
+    except LeadError as error:
+        raise _http(error) from error
+    rows = db.scalars(
+        select(VoiceCall)
+        .where(VoiceCall.lead_id == lead.id)
+        .order_by(VoiceCall.created_at.desc())
+        .limit(50)
+    )
+    return [VoiceCallOut.model_validate(row) for row in rows]
 
 
 @router.get("/assignable-users", response_model=list[AssignableUserOut])

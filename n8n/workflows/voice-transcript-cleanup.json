@@ -1,0 +1,532 @@
+{
+  "name": "Voice Transcript Cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 3
+            }
+          ]
+        }
+      },
+      "id": "cleanup-schedule",
+      "name": "Daily At 03:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Counts only: what the sweep removed, never whose calls were touched.\nconst response = $input.all()[0].json;\nconst body = response.body && typeof response.body === 'object' ? response.body : {};\nreturn [{\n  json: {\n    outcome: 'swept',\n    purged_transcripts: Number(body.purged_transcripts || 0),\n    purged_recordings: Number(body.purged_recordings || 0),\n    ran_at: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "code-summarize-sweep",
+      "name": "Summarize Sweep",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2540,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The CRM could not be reached; the sweep simply runs again tomorrow.\nconst item = $input.all()[0].json;\nreturn [{\n  json: {\n    outcome: 'not_swept',\n    status: Number(item.status || 0) || null,\n    message: String(item.message || 'The CRM did not accept the sweep.').slice(0, 300),\n    ran_at: new Date().toISOString(),\n  },\n}];\n"
+      },
+      "id": "code-give-up-until-tomorrow",
+      "name": "Give Up Until Tomorrow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2540,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/voice-calls/cleanup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_VOICE_API_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "crm-cleanup-1",
+      "name": "CRM Cleanup",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every attempt is classified. Output carries the outcome and a\n// bounded message only — never the dispatch body.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'The CRM rejected the dispatch (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry' } }];\n"
+      },
+      "id": "code-classify-cleanup",
+      "name": "Classify Cleanup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-cleanup-1",
+      "name": "Route Cleanup",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        620,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/voice-calls/cleanup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_VOICE_API_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "crm-cleanup-2",
+      "name": "CRM Cleanup 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        840,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every attempt is classified. Output carries the outcome and a\n// bounded message only — never the dispatch body.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'The CRM rejected the dispatch (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'retry' } }];\n"
+      },
+      "id": "code-classify-cleanup-2",
+      "name": "Classify Cleanup 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-cleanup-2",
+      "name": "Route Cleanup 2",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.CRM_API_URL }}/api/v1/inbound/voice-calls/cleanup",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{ $env.CRM_VOICE_API_KEY || $env.CRM_INBOUND_API_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "crm-cleanup-3",
+      "name": "CRM Cleanup 3",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1460,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Every attempt is classified. Output carries the outcome and a\n// bounded message only — never the dispatch body.\nconst PERMANENT = [400, 401, 403, 404, 405, 409, 413, 415, 422];\nconst response = $input.all()[0].json;\nconst status = Number(response.statusCode || 0);\n\nif (status >= 200 && status < 300) {\n  return [{ json: { outcome: 'success' } }];\n}\nif (PERMANENT.includes(status)) {\n  return [{ json: { outcome: 'permanent', status,\n    message: 'The CRM rejected the dispatch (' + status + ')' } }];\n}\nreturn [{ json: { outcome: 'exhausted', status: 503, message: 'CRM unavailable after 3 attempts' } }];\n"
+      },
+      "id": "code-classify-cleanup-3",
+      "name": "Classify Cleanup 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "success",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "success"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.outcome }}",
+                    "rightValue": "retry",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "outputKey": "retry"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "failed"
+        }
+      },
+      "id": "route-cleanup-3",
+      "name": "Route Cleanup 3",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        1860,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "CRM Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Classify Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Route Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Cleanup": {
+      "main": [
+        [
+          {
+            "node": "Summarize Sweep",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Cleanup 2",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Tomorrow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Cleanup 2": {
+      "main": [
+        [
+          {
+            "node": "Classify Cleanup 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Cleanup 2": {
+      "main": [
+        [
+          {
+            "node": "Route Cleanup 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Cleanup 2": {
+      "main": [
+        [
+          {
+            "node": "Summarize Sweep",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "CRM Cleanup 3",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Tomorrow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "CRM Cleanup 3": {
+      "main": [
+        [
+          {
+            "node": "Classify Cleanup 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Cleanup 3": {
+      "main": [
+        [
+          {
+            "node": "Route Cleanup 3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route Cleanup 3": {
+      "main": [
+        [
+          {
+            "node": "Summarize Sweep",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Tomorrow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Give Up Until Tomorrow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily At 03:00": {
+      "main": [
+        [
+          {
+            "node": "CRM Cleanup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveManualExecutions": false,
+    "saveExecutionProgress": false
+  },
+  "active": false,
+  "pinData": {}
+}

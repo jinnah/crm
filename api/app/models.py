@@ -21,7 +21,17 @@ ROLES = ("owner", "manager", "team_member")
 LEAD_STATUSES = ("new", "contacted", "qualified", "won", "lost")
 
 # Normalized source/channel values; "manual" marks leads created in the UI.
-CHANNELS = ("web_form", "phone_call", "sms", "whatsapp", "facebook", "email", "other", "manual")
+CHANNELS = (
+    "web_form",
+    "phone_call",
+    "voice_call",
+    "sms",
+    "whatsapp",
+    "facebook",
+    "email",
+    "other",
+    "manual",
+)
 
 CUSTOM_FIELD_TYPES = ("text", "number", "date", "boolean", "select")
 
@@ -47,6 +57,7 @@ ACTIVITY_TYPES = (
     "appointment_no_show",
     "booking_link_created",
     "booking_link_revoked",
+    "voice_call",
 )
 
 # Outbound message purposes and delivery states.
@@ -55,7 +66,16 @@ MESSAGE_STATUSES = ("pending", "submitted", "delivered", "failed", "unknown")
 
 # Appointment lifecycle. Appointments are never hard-deleted.
 APPOINTMENT_STATUSES = ("scheduled", "completed", "canceled", "no_show")
-APPOINTMENT_ORIGINS = ("staff", "customer")
+APPOINTMENT_ORIGINS = ("staff", "customer", "voice")
+
+# Voice-call enumerations: everything the AI agent reports is normalized to
+# these bounded values before storage.
+VOICE_CALL_STATUSES = ("completed", "no_answer", "abandoned", "transferred", "failed")
+VOICE_URGENCIES = ("normal", "urgent")
+VOICE_TRANSFER_OUTCOMES = ("none", "completed", "failed")
+VOICE_CONSENT_RESULTS = ("granted", "declined", "not_asked")
+VOICE_MESSAGE_STATES = ("skipped", "no_destination", "sent", "failed", "unknown")
+VOICE_ALERT_RECIPIENTS = ("business", "assigned", "both")
 
 # Appointment notification kinds and their durable delivery state.
 NOTIFICATION_TYPES = ("confirmation", "reminder", "rescheduled", "canceled")
@@ -97,6 +117,11 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[str] = mapped_column(String(20))
+    # Optional, owner-managed presentation fields. The display name stands in
+    # for the email everywhere a customer might see it; the notification phone
+    # is a separate E.164 destination for staff alerts, never a login identity.
+    display_name: Mapped[str] = mapped_column(String(100), default="")
+    notification_phone: Mapped[str | None] = mapped_column(String(32))
     is_active: Mapped[bool] = mapped_column(default=True)
     must_change_password: Mapped[bool] = mapped_column(default=False)
     password_changed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
@@ -277,6 +302,10 @@ class CommunicationSettings(Base):
     __tablename__ = "communication_settings"
     __table_args__ = (
         CheckConstraint("singleton = 'X'", name="ck_communication_settings_singleton"),
+        CheckConstraint(
+            "voice_alert_recipients IN ('business', 'assigned', 'both')",
+            name="ck_communication_settings_voice_recipients",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
@@ -344,6 +373,36 @@ class CommunicationSettings(Base):
     )
     # Weekday availability as {"mon": [["09:00", "17:00"]], ...} in business time.
     business_hours: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    # --- Voice calls -----------------------------------------------------
+    # Messaging and booking behaviour for the AI voice-call channel. Provider
+    # and AI credentials never live here.
+    voice_ack_enabled: Mapped[bool] = mapped_column(default=False)
+    voice_ack_template: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "Hi {{lead_name}}, thanks for calling {{business_name}}. "
+            "We have your request and will be in touch shortly."
+        ),
+    )
+    voice_alert_enabled: Mapped[bool] = mapped_column(default=False)
+    voice_alert_template: Mapped[str] = mapped_column(
+        Text,
+        default=(
+            "New call: {{lead_name}} — {{service_requested}}. "
+            "{{call_summary}} (CRM ref {{lead_id}})"
+        ),
+    )
+    # Who receives the alert: the business number, the assigned user's
+    # notification phone, or both.
+    voice_alert_recipients: Mapped[str] = mapped_column(String(16), default="business")
+    # Staff member offered to callers when the lead has no active assignee.
+    voice_default_staff_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
+    # Full-transcript retention is off by default and always consent-gated.
+    voice_transcript_retention_enabled: Mapped[bool] = mapped_column(default=False)
+    voice_transcript_retention_days: Mapped[int] = mapped_column(Integer, default=30)
 
     # --- Branding -------------------------------------------------------
     # The logo is small, single-tenant and changes rarely, so it lives in the
@@ -416,13 +475,15 @@ class Appointment(Base):
             "status IN ('scheduled', 'completed', 'canceled', 'no_show')",
             name="ck_appointments_status",
         ),
-        CheckConstraint("origin IN ('staff', 'customer')", name="ck_appointments_origin"),
+        CheckConstraint("origin IN ('staff', 'customer', 'voice')", name="ck_appointments_origin"),
         CheckConstraint("end_at > start_at", name="ck_appointments_range"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # RESTRICT: appointment history must survive; leads are archived, never
+    # hard-deleted, so a lead deletion that would erase history is refused.
     lead_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("leads.id", ondelete="CASCADE"), index=True
+        ForeignKey("leads.id", ondelete="RESTRICT"), index=True
     )
     assigned_to: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), index=True
@@ -435,6 +496,9 @@ class Appointment(Base):
     timezone: Mapped[str] = mapped_column(String(64), default="UTC")
     status: Mapped[str] = mapped_column(String(16), default="scheduled")
     origin: Mapped[str] = mapped_column(String(16), default="staff")
+    # Monotonic schedule revision: every reschedule or disposition increments
+    # it, mutations carry the revision they saw, and stale writes get 409.
+    revision: Mapped[int] = mapped_column(Integer, default=1)
     booking_reference: Mapped[str | None] = mapped_column(String(24), unique=True)
     # Opaque capability for customer-initiated reschedule/cancel; only its
     # digest is stored, so knowing the appointment UUID grants nothing.
@@ -508,12 +572,17 @@ class AppointmentNotification(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    # RESTRICT: notification history must survive its appointment.
     appointment_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("appointments.id", ondelete="CASCADE"), index=True
+        ForeignKey("appointments.id", ondelete="RESTRICT"), index=True
     )
     type: Mapped[str] = mapped_column(String(16))
     # Distinguishes reminder offsets and reschedule generations.
     occurrence: Mapped[str] = mapped_column(String(64), default="1")
+    # The appointment revision this message describes. Delivery re-checks it
+    # immediately before the provider is contacted, so a reminder for an old
+    # time can never go out after a reschedule.
+    schedule_revision: Mapped[int] = mapped_column(Integer, default=1)
     scheduled_at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
     state: Mapped[str] = mapped_column(String(16), default="pending")
     outbound_message_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -529,6 +598,87 @@ class AppointmentNotification(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     appointment: Mapped["Appointment"] = relationship()
+
+
+class VoiceCall(Base):
+    """Durable record of one AI-answered phone call.
+
+    `call_sid` is the provider-level idempotency identity — an identifier,
+    never authority. The row keeps the structured facts the agent collected;
+    raw provider payloads are not stored, and the optional transcript is
+    consent-gated, bounded and purgeable while the summary survives.
+    """
+
+    __tablename__ = "voice_calls"
+    __table_args__ = (
+        CheckConstraint(
+            "call_status IN ('completed', 'no_answer', 'abandoned', 'transferred', 'failed')",
+            name="ck_voice_calls_status",
+        ),
+        CheckConstraint("urgency IN ('normal', 'urgent')", name="ck_voice_calls_urgency"),
+        CheckConstraint(
+            "transfer_outcome IN ('none', 'completed', 'failed')",
+            name="ck_voice_calls_transfer",
+        ),
+        CheckConstraint(
+            "consent_result IN ('granted', 'declined', 'not_asked')",
+            name="ck_voice_calls_consent",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(32), default="twilio")
+    call_sid: Mapped[str] = mapped_column(String(64), unique=True)
+    # RESTRICT: call history must survive; leads are never hard-deleted.
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="RESTRICT"), index=True
+    )
+    activity_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("lead_activities.id", ondelete="SET NULL")
+    )
+    # An appointment booked during this call, when there is one.
+    appointment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("appointments.id", ondelete="SET NULL")
+    )
+    caller_phone: Mapped[str | None] = mapped_column(String(32), index=True)
+    business_phone: Mapped[str | None] = mapped_column(String(32))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    answered_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    ended_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    call_status: Mapped[str] = mapped_column(String(16), default="completed")
+    disposition: Mapped[str] = mapped_column(String(64), default="")
+    caller_name: Mapped[str] = mapped_column(String(200), default="")
+    service_requested: Mapped[str] = mapped_column(String(300), default="")
+    service_address: Mapped[str] = mapped_column(String(300), default="")
+    preferred_callback_window: Mapped[str] = mapped_column(String(200), default="")
+    # A time the caller mentioned, recorded verbatim as a PREFERENCE — this is
+    # never a booked appointment; a booking sets appointment_id instead.
+    appointment_preference: Mapped[str] = mapped_column(String(200), default="")
+    summary: Mapped[str] = mapped_column(String(2000), default="")
+    urgency: Mapped[str] = mapped_column(String(8), default="normal")
+    requires_human_follow_up: Mapped[bool] = mapped_column(default=False)
+    transfer_outcome: Mapped[str] = mapped_column(String(16), default="none")
+    disclosure_version: Mapped[str] = mapped_column(String(64), default="")
+    consent_result: Mapped[str] = mapped_column(String(16), default="not_asked")
+    # A retry with the same CallSid but a different immutable identity is
+    # refused and flagged here rather than rewriting history.
+    completion_conflict: Mapped[bool] = mapped_column(default=False)
+    # Outcome of the automated messages for this call, so missing
+    # destinations and ambiguous sends surface as controlled states.
+    ack_state: Mapped[str] = mapped_column(String(16), default="skipped")
+    alert_state: Mapped[str] = mapped_column(String(16), default="skipped")
+    # Bounded provider reference only — never audio, credentials or URLs.
+    recording_sid: Mapped[str | None] = mapped_column(String(64))
+    # Consent-gated, bounded plain text; purged after the retention period.
+    transcript_text: Mapped[str | None] = mapped_column(Text)
+    retention_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    purged_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    meta: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    lead: Mapped["Lead"] = relationship()
 
 
 class InboundEvent(Base):

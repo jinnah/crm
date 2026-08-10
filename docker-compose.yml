@@ -34,8 +34,13 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_SENDER: ${SMTP_SENDER:-}
       SMTP_TLS: ${SMTP_TLS:-starttls}
+      INTERNAL_BFF_KEY: ${INTERNAL_BFF_KEY:-}
+      VOICE_API_KEY: ${VOICE_API_KEY:-}
     ports:
-      - "8000:8000"
+      # Loopback-only by default: browsers reach the API through the same
+      # host, and in production a reverse proxy is the only public boundary.
+      # The internal capability endpoints additionally require the BFF key.
+      - "127.0.0.1:8000:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -55,6 +60,8 @@ services:
       # Server-side only: never exposed to the browser.
       N8N_FORM_WEBHOOK_URL: ${N8N_FORM_WEBHOOK_URL:-http://n8n:5678/webhook/web-form}
       FORM_SHARED_SECRET: ${FORM_SHARED_SECRET:-}
+      # Server-only: presented to the CRM's internal capability endpoints.
+      INTERNAL_BFF_KEY: ${INTERNAL_BFF_KEY:-}
       # The public booking page reaches the CRM only through the server, so the
       # API itself never has to be published to the internet.
       CRM_API_URL: ${CRM_API_URL:-http://api:8000}
@@ -96,6 +103,8 @@ services:
       META_VERIFY_TOKEN: ${META_VERIFY_TOKEN:-}
       FORM_SHARED_SECRET: ${FORM_SHARED_SECRET:-}
       CRM_SEND_SECRET: ${N8N_SEND_SECRET:-}
+      CRM_VOICE_API_KEY: ${VOICE_API_KEY:-}
+      VOICE_INTAKE_SECRET: ${VOICE_INTAKE_SECRET:-}
       TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
       TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
       # Override only for local verification against a mock provider.

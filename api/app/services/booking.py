@@ -18,6 +18,7 @@ from app.config import Settings
 from app.models import Appointment, BookingLink, Lead, User, utcnow
 from app.security.tokens import digest_token, generate_token
 from app.services.leads import add_activity, can_manage_leads
+from app.services.messaging import lock_lead
 from app.services.scheduling import SchedulingError
 
 DEFAULT_LINK_TTL_DAYS = 14
@@ -48,7 +49,13 @@ def create_link(
     duration_minutes: int | None = None,
     ttl_days: int = DEFAULT_LINK_TTL_DAYS,
 ) -> tuple[BookingLink, str]:
-    """Create a link, returning it with the raw token (shown once)."""
+    """Create a link, returning it with the raw token (shown once).
+
+    Serialized on the lead row: concurrent create/regenerate/revoke for one
+    lead run one after the other, so exactly one capability survives and a
+    revocation invalidates every earlier link.
+    """
+    lock_lead(db, lead.id)
     _assert_may_manage_links(acting_user, lead)
     if lead.archived_at is not None:
         raise SchedulingError("Restore this lead before creating a booking link.", 409)
@@ -105,7 +112,9 @@ def revoke_active(db: Session, lead_id: uuid.UUID) -> int:
 
 
 def revoke_link(db: Session, acting_user: User, lead: Lead, link: BookingLink) -> BookingLink:
+    lock_lead(db, lead.id)  # serialized with concurrent create/regenerate
     _assert_may_manage_links(acting_user, lead)
+    db.refresh(link)
     if link.revoked_at is None:
         link.revoked_at = utcnow()
         db.flush()
@@ -153,6 +162,21 @@ def resolve_token(db: Session, raw_token: str, settings: Settings) -> BookingLin
 def issue_manage_token(settings: Settings) -> tuple[str, str]:
     """Capability for customer-side reschedule/cancel of one appointment."""
     raw = generate_token()
+    return raw, digest_token(raw, settings.session_token_pepper)
+
+
+def derive_manage_token(
+    settings: Settings, link_id: uuid.UUID, booking_key: str
+) -> tuple[str, str]:
+    """Deterministic manage capability for customer self-bookings.
+
+    The raw value is an HMAC of the booking link and the customer's booking
+    key under the server pepper: opaque to everyone else, but reproducible by
+    the server alone. A replayed booking (same link, same key) therefore gets
+    back the SAME working capability even when the original response was
+    lost, and nothing raw is ever stored — only its digest.
+    """
+    raw = digest_token(f"manage-capability:{link_id}:{booking_key}", settings.session_token_pepper)
     return raw, digest_token(raw, settings.session_token_pepper)
 
 

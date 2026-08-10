@@ -20,7 +20,22 @@ DEFAULT_PASSWORD = "correct horse battery staple"
 # Test-only inbound API key (≥32 chars); real keys are generated per install.
 TEST_INBOUND_KEY = "test-inbound-api-key-0123456789abcdef"
 os.environ["INBOUND_API_KEY"] = TEST_INBOUND_KEY
+# Server-only BFF credential for the internal capability endpoints, and the
+# dedicated voice-ingestion key. Test values; real keys are generated.
+TEST_INTERNAL_KEY = "test-internal-bff-key-0123456789abcdef"
+os.environ["INTERNAL_BFF_KEY"] = TEST_INTERNAL_KEY
+TEST_VOICE_KEY = "test-voice-api-key-0123456789abcdefgh"
+os.environ["VOICE_API_KEY"] = TEST_VOICE_KEY
 get_settings.cache_clear()
+
+
+def internal_headers() -> dict[str, str]:
+    """Headers the Next.js BFF would send to the internal endpoints."""
+    return {"X-Internal-Key": TEST_INTERNAL_KEY}
+
+
+def voice_headers() -> dict[str, str]:
+    return {"X-API-Key": TEST_VOICE_KEY}
 
 
 class RecordingMailer:
