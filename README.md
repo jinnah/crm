@@ -173,6 +173,13 @@ Binaries live outside PostgreSQL behind `DOCUMENTS_STORAGE_BACKEND`:
 
 **Backups must cover the database and the object store together**: a database snapshot without the matching objects (or vice versa) restores documents whose files are missing. Take `pg_dump` and the object-store backup as one coordinated operation, and restore them as a pair. The authenticated `POST /api/v1/inbound/documents/reconcile` endpoint (run on a schedule by n8n, or manually) sweeps abandoned temporary objects and reports referenced-but-missing ones after a restore.
 
+**Restore and rollback procedure.** The jobs/documents/commercial/email migration (`a7c9e2d41f68`) refuses to downgrade while any job, uploaded-document, commercial, payment or email-delivery row exists — the check runs before any schema change, so a refused downgrade leaves the database untouched (`api/tests/test_migration_guard.py` proves this against PostgreSQL). Rolling back a populated installation therefore always means **restore from backup**, never a data-bearing downgrade:
+
+1. Take the coordinated backup pair (database + object store) immediately **before** every upgrade; stop the `api` container first so no upload sits mid-pipeline between the two snapshots.
+2. To roll back: stop `api` and `n8n`, restore the database dump, restore the object-store backup from the same operation, then start the **code version that matches the restored schema** — each release expects exactly its own Alembic head; never run newer code against an older restored schema or vice versa.
+3. After any restore, run `POST /api/v1/inbound/documents/reconcile` and review the result: `removed_orphans` counts swept stray objects (writes that happened after the object-store snapshot), `missing_objects` counts rows whose file is gone (writes after the database snapshot). Missing objects cannot be reconstructed — restore a matching object-store backup, or remove those document rows deliberately through the audited delete flow.
+4. If the database and object store were restored from different points in time, treat the pair as diverged: re-restore a matching pair. Reconcile only measures the blast radius; it cannot re-pair mismatched backups.
+
 ### Malware scanning
 
 Uploads stay quarantined until scanning succeeds; a scanner outage fails closed. `SCANNER_BACKEND=stub` (EICAR-only) keeps development light; production **must** use `clamd` — start the bundled scanner with `docker compose --profile scanning up -d` (first start downloads signatures; allow a few minutes).
