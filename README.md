@@ -148,6 +148,20 @@ docker compose restart n8n
 
 The installer lists what is already present, **stops with instructions if duplicate active workflows exist** (it never deletes workflow data itself), imports only workflows whose names are not installed yet, and publishes what it imported. To update an existing workflow, delete or rename the old copy deliberately in the editor (the n8n 2.x CLI has no delete command) and re-run the installer. This keeps every installation on the same versioned workflow set with no silent duplicates.
 
+### Error workflow assignment
+
+Every production workflow must reference **Inbound Error Handler** as its error workflow, but workflow IDs are per-installation, so the committed files cannot carry the assignment and a fresh import always starts unassigned. After every installer run — and before relying on the workflows in production — resolve and verify the assignment through n8n's public REST API:
+
+```bash
+node n8n/assign-error-workflow.mjs check
+```
+
+```bash
+node n8n/assign-error-workflow.mjs apply
+```
+
+Set `N8N_API_BASE_URL` and `N8N_API_KEY` in the environment first (create the key under *Settings → n8n API*; the `workflow:read` + `workflow:update` scopes suffice — see `.env.example`). `check` is read-only and exits nonzero if any workflow is missing, duplicated, malformed or unassigned, which makes it suitable for deployment validation; `apply` assigns only where needed, changes nothing else on the workflow, re-reads each one to confirm the value actually persisted, and is safe to re-run any time. The installation sequence is therefore: import → `apply` → `check` → only then activate anything new or run smoke tests.
+
 ### Editor access and exposure
 
 n8n 2.x has no basic-auth environment mechanism (`N8N_BASIC_AUTH_*` was removed). Editor access is protected by **n8n's built-in user management**: the first visit to http://localhost:5678 prompts you to create the owner account, and further editors are invited from *Settings → Users*. Locally the port is bound to `127.0.0.1` only, so the editor is not reachable from other machines.
@@ -158,7 +172,7 @@ For any non-local deployment, put n8n behind a reverse proxy that:
 - restricts the editor UI and the REST/management surface (`/rest`, `/api`, `/webhook-test`) to trusted networks, a VPN, or an authenticated proxy;
 - terminates TLS and sets `WEBHOOK_URL` to the public HTTPS origin (Twilio and Meta signature checks are computed against that exact URL).
 
-Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms`, `/webhook/twilio-voice`, `/webhook/twilio-status` (delivery callbacks), `/webhook/meta-whatsapp`, `/webhook/meta-messenger` (the Meta paths also answer the GET verification handshake), plus the internal `/webhook/twilio-send` the CRM calls to send SMS. "Appointment Reminders" has no webhook — it runs on a schedule and calls the CRM. Configure the provider secrets in `.env` (`TWILIO_AUTH_TOKEN`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, optional `FORM_SHARED_SECRET`); signature checks reject unauthenticated calls. In the n8n UI, set "Inbound Error Handler" as the default error workflow for the channel workflows. Website forms POST JSON with `submission_id`, `name`, `email`/`phone`, `message`, and optional `form`/`page`/`campaign`/`referrer`/`submitted_at`.
+Webhook endpoints (POST unless noted): `/webhook/web-form`, `/webhook/twilio-sms`, `/webhook/twilio-voice`, `/webhook/twilio-status` (delivery callbacks), `/webhook/meta-whatsapp`, `/webhook/meta-messenger` (the Meta paths also answer the GET verification handshake), plus the internal `/webhook/twilio-send` the CRM calls to send SMS. "Appointment Reminders" has no webhook — it runs on a schedule and calls the CRM. Configure the provider secrets in `.env` (`TWILIO_AUTH_TOKEN`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, optional `FORM_SHARED_SECRET`); signature checks reject unauthenticated calls. Every channel workflow must reference "Inbound Error Handler" as its error workflow — run `node n8n/assign-error-workflow.mjs apply` after installing (see *Error workflow assignment* above). Website forms POST JSON with `submission_id`, `name`, `email`/`phone`, `message`, and optional `form`/`page`/`campaign`/`referrer`/`submitted_at`.
 
 ## Jobs, documents and commercial records
 
@@ -190,7 +204,7 @@ The CRM never talks to an email provider. It records a durable delivery (recipie
 
 1. Verify the sender address with your email provider, then set `DOCUMENT_EMAIL_FROM_ADDRESS` (and `DOCUMENT_EMAIL_API_KEY`) in `.env`. With no address configured, sending is disabled with a clear message; drafts and PDFs still work. Neither users nor API callers can override the From address.
 2. In the n8n editor, create an SMTP credential named **Document Email SMTP** and select it in the workflow's two send nodes.
-3. Set "Inbound Error Handler" as the workflow's error workflow.
+3. Run `node n8n/assign-error-workflow.mjs apply` so "Inbound Error Handler" is set as the workflow's error workflow (covered automatically with all other workflows — see *Error workflow assignment*).
 
 The owner-facing pieces (From display name, Reply-To, subject/body templates with a small variable allowlist, link expiry, attach-versus-link default) live in *Settings → Documents & email*.
 
