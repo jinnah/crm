@@ -151,7 +151,14 @@ services:
   # set SCANNER_BACKEND=clamd to use it); REQUIRED in production. The signature
   # database persists in clamav_data.
   clamav:
-    image: clamav/clamav:stable
+    # Pinned by immutable digest (the multi-platform index of the official
+    # ClamAV 1.5.4 release, linux/amd64) so production cannot drift under a
+    # mutable tag. Virus definitions are NOT pinned — freshclam inside the
+    # container keeps updating the clamav_data volume as before. To upgrade,
+    # verify the new release's digest first:
+    #   docker buildx imagetools inspect clamav/clamav:<version>
+    # then replace the digest here deliberately.
+    image: clamav/clamav@sha256:78810772a92b4a9168115bc6b2e0ffd702640893b9577f8c3d0432762d2655c4
     profiles: ["scanning"]
     volumes:
       - clamav_data:/var/lib/clamav
