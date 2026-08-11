@@ -24,7 +24,13 @@ const ENV = {
   TWILIO_FROM_NUMBER: "+15550209999",
 };
 
-type Item = { json: Record<string, unknown>; binary?: Record<string, unknown> };
+type Item = {
+  json: Record<string, unknown>;
+  binary?: Record<string, unknown>;
+  // n8n provenance metadata: which item of the previous node produced this
+  // item. Code nodes resolve $('Node').itemMatching(i) through this chain.
+  pairedItem?: { item: number } | number;
+};
 type Workflow = {
   name: string;
   settings?: Record<string, unknown>;
@@ -43,17 +49,66 @@ function loadWorkflow(file: string): Workflow {
   return JSON.parse(fs.readFileSync(path.join(WORKFLOWS_DIR, file), "utf8"));
 }
 
-function runCodeNode(workflow: Workflow, nodeName: string, items: Item[], env = ENV) {
+/**
+ * Minimal model of n8n 2.11.3's `$('Node').itemMatching(index)` for Code
+ * nodes: the queried node's item is found by walking the CURRENT input item's
+ * `pairedItem` provenance metadata — never by assuming input position equals
+ * source position. Unknown nodes, absent provenance, and out-of-range links
+ * throw, exactly like n8n's "can't determine paired item" errors, so tests
+ * can model deliberately broken pairing. Built fresh per runCodeNode call —
+ * no state survives between tests.
+ */
+function makePairedItemAccessor(pairing: Record<string, Item[]>, items: Item[]) {
+  return (nodeName: string) => {
+    const sourceItems = pairing[nodeName];
+    if (!sourceItems) throw new Error(`no pairing data registered for node ${nodeName}`);
+    return {
+      itemMatching(index: number): Item {
+        const paired = items[index]?.pairedItem;
+        const sourceIndex = typeof paired === "number" ? paired : paired?.item;
+        if (sourceIndex === undefined || sourceItems[sourceIndex] === undefined) {
+          throw new Error(`can't determine the paired item for input item ${index}`);
+        }
+        return sourceItems[sourceIndex];
+      },
+    };
+  };
+}
+
+function runCodeNode(
+  workflow: Workflow,
+  nodeName: string,
+  items: Item[],
+  env = ENV,
+  pairing?: Record<string, Item[]>,
+) {
   const node = workflow.nodes.find((candidate) => candidate.name === nodeName);
   if (!node) throw new Error(`node ${nodeName} not found in ${workflow.name}`);
   const nodeRequire = createRequire(import.meta.url);
   // Test-only execution of our own version-controlled Code-node source (the
   // same code n8n runs). Nothing user-supplied or interpolated reaches this
   // function body.
-  const fn = new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode));
+  //
+  // `$` is only placed in scope when a test supplies pairing data; without it
+  // the code runs exactly as before (referencing $ is a ReferenceError), which
+  // is also how the classifier's no-$ degradation is tested.
+  const result = pairing
+    ? new Function("$input", "$env", "require", "Buffer", "$", String(node.parameters.jsCode))(
+        { all: () => items },
+        env,
+        nodeRequire,
+        Buffer,
+        makePairedItemAccessor(pairing, items),
+      )
+    : new Function("$input", "$env", "require", "Buffer", String(node.parameters.jsCode))(
+        { all: () => items },
+        env,
+        nodeRequire,
+        Buffer,
+      );
   // Workflow outputs are dynamic by nature; tests assert their shapes, so the
   // cast declares the fields the assertions reach for.
-  return fn({ all: () => items }, env, nodeRequire, Buffer) as Array<{
+  return result as Array<{
     json: Record<string, unknown> & { event: Record<string, unknown> };
   }>;
 }
@@ -1229,5 +1284,190 @@ describe("document-email workflow", () => {
     expect(summary.json.outcome).toBe("run_complete");
     expect(summary.json.counts).toMatchObject({ submitted: 2, failed: 1 });
     expect(JSON.stringify(summary.json)).not.toContain("leak@customer.test");
+  });
+});
+
+describe("document-email classification regressions (37f009f)", () => {
+  // On real n8n 2.11.3 the email node REPLACES each item's json: a successful
+  // send yields nodemailer's result (no delivery_id), a send error yields
+  // { error: '...' } (no delivery_id), and a node-level error such as a
+  // missing credential passes the input item through with no visible error at
+  // all. The pre-37f009f classifier assumed delivery_id survived in the item
+  // json, so successful sends were reported with an empty id (silently
+  // dropped by the CRM -> lease expiry -> endless resend) and credential-less
+  // runs were falsely reported submitted. These tests pin the fixed contract;
+  // every one of them fails against the 626d2c5 classifier.
+  const workflow = loadWorkflow("document-email.json");
+  const EMAIL_ENV = {
+    ...ENV,
+    CRM_DOCUMENT_EMAIL_KEY: "test-document-email-key-not-real",
+  };
+
+  // The email node's success output as observed on n8n 2.11.3.
+  function nodemailerResult(messageId: string, recipient: string): Item["json"] {
+    return {
+      accepted: [recipient],
+      rejected: [],
+      response: "250 2.0.0 OK queued",
+      envelope: { from: "documents@crm.test", to: [recipient] },
+      messageId,
+    };
+  }
+
+  test("successful submission recovers its delivery_id through item pairing", () => {
+    const results = runCodeNode(
+      workflow,
+      "Classify Send",
+      [{ json: nodemailerResult("<m-1@crm.test>", "a@customer.test"), pairedItem: { item: 0 } }],
+      EMAIL_ENV,
+      { "Unpack Claims": [{ json: { delivery_id: "delivery-AAA" } }] },
+    );
+    expect(results).toHaveLength(1);
+    const [result] = results;
+    expect(result.json.outcome).toBe("submitted");
+    expect(result.json.delivery_id).toBe("delivery-AAA");
+    expect(result.json.provider_message_id).toBe("<m-1@crm.test>");
+  });
+
+  test("multi-item executions attribute every result by provenance, never by position", () => {
+    // The input order is deliberately REVERSED relative to the Unpack Claims
+    // output (item 0 pairs to source 1 and vice versa), so any positional
+    // delivery_id guess reports one delivery's outcome under the other's id.
+    const results = runCodeNode(
+      workflow,
+      "Classify Send",
+      [
+        { json: nodemailerResult("<m-2@crm.test>", "b@customer.test"), pairedItem: { item: 1 } },
+        { json: { error: "Connection closed unexpectedly" }, pairedItem: { item: 0 } },
+      ],
+      EMAIL_ENV,
+      {
+        "Unpack Claims": [
+          { json: { delivery_id: "delivery-FIRST" } },
+          { json: { delivery_id: "delivery-SECOND" } },
+        ],
+      },
+    );
+    expect(results).toHaveLength(2);
+    expect(results[0].json).toMatchObject({
+      outcome: "submitted",
+      delivery_id: "delivery-SECOND",
+    });
+    expect(results[1].json).toMatchObject({
+      outcome: "unknown",
+      delivery_id: "delivery-FIRST",
+    });
+  });
+
+  test("a pass-through item with no send result is never reported submitted", () => {
+    // Node-level failures (e.g. no SMTP credential assigned) pass the input
+    // item through untouched: claim fields present, no messageId/accepted, no
+    // error. Nothing was sent, so the only safe outcome is leaving the claim
+    // for lease recovery.
+    const [result] = runCodeNode(
+      workflow,
+      "Classify Send",
+      [
+        {
+          json: {
+            outcome: "send_link",
+            delivery_id: "delivery-BBB",
+            recipient: "c@customer.test",
+            subject: "Quote Q-2026-0001",
+            body_text: "hello",
+          },
+          pairedItem: { item: 0 },
+        },
+      ],
+      EMAIL_ENV,
+      { "Unpack Claims": [{ json: { delivery_id: "delivery-BBB" } }] },
+    );
+    expect(result.json.outcome).toBe("leave");
+    expect(result.json.failure_class).toBe("no_send_result");
+    expect(result.json.outcome).not.toBe("submitted");
+  });
+
+  test("broken pairing degrades to leave instead of guessing or reporting", () => {
+    // A successful send whose provenance chain cannot be resolved (no
+    // pairedItem metadata -> itemMatching throws, as n8n does) must not be
+    // reported under a guessed or empty id: an unattributable report would be
+    // rejected by the CRM and the submission silently lost.
+    const [result] = runCodeNode(
+      workflow,
+      "Classify Send",
+      [{ json: nodemailerResult("<m-3@crm.test>", "d@customer.test") }], // no pairedItem
+      EMAIL_ENV,
+      { "Unpack Claims": [{ json: { delivery_id: "delivery-CCC" } }] },
+    );
+    expect(result.json.outcome).toBe("leave");
+    expect(result.json.failure_class).toBe("unresolved_delivery_id");
+    expect(result.json.delivery_id ?? "").toBe("");
+    expect(["submitted", "failed", "unknown"]).not.toContain(result.json.outcome);
+  });
+
+  test("with no $ accessor at all the classifier degrades safely", () => {
+    // Omitting the pairing argument runs the code with $ out of scope
+    // entirely (a ReferenceError if touched) — the classifier must not crash,
+    // not guess an id, and not report a submission it cannot attribute.
+    const [result] = runCodeNode(
+      workflow,
+      "Classify Send",
+      [{ json: nodemailerResult("<m-4@crm.test>", "e@customer.test") }],
+      EMAIL_ENV,
+    );
+    expect(result.json.outcome).toBe("leave");
+    expect(result.json.failure_class).toBe("unresolved_delivery_id");
+    expect(result.json.delivery_id ?? "").toBe("");
+  });
+
+  test("an ambiguous post-DATA connection loss reports unknown exactly once", () => {
+    // "Connection closed unexpectedly" arrives AFTER message data may have
+    // been accepted. Classifying it as a pre-submission retry (the pre-fix
+    // behavior via the greedy /connect/i pattern) risks sending the customer
+    // a duplicate; it must be unknown, under the correct id, never retried.
+    const results = runCodeNode(
+      workflow,
+      "Classify Send",
+      [{ json: { error: "Connection closed unexpectedly" }, pairedItem: { item: 0 } }],
+      EMAIL_ENV,
+      { "Unpack Claims": [{ json: { delivery_id: "delivery-DDD" } }] },
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0].json).toMatchObject({
+      outcome: "unknown",
+      delivery_id: "delivery-DDD",
+      failure_class: "ambiguous",
+    });
+  });
+
+  test("permanent rejection and connect-stage failures keep their semantics under pairing", () => {
+    const results = runCodeNode(
+      workflow,
+      "Classify Send",
+      [
+        {
+          json: { error: "Can't send mail - all recipients were rejected: 550 5.1.1 mailbox unavailable" },
+          pairedItem: { item: 0 },
+        },
+        { json: { error: "getaddrinfo ENOTFOUND smtp.example.test" }, pairedItem: { item: 1 } },
+      ],
+      EMAIL_ENV,
+      {
+        "Unpack Claims": [
+          { json: { delivery_id: "delivery-EEE" } },
+          { json: { delivery_id: "delivery-FFF" } },
+        ],
+      },
+    );
+    expect(results[0].json).toMatchObject({
+      outcome: "failed",
+      delivery_id: "delivery-EEE",
+      failure_class: "provider_rejected",
+    });
+    // Nothing reached the provider: the claim is left for lease recovery.
+    expect(results[1].json).toMatchObject({ outcome: "leave", failure_class: "pre_submission" });
+    for (const item of results) {
+      expect(item.json.outcome).not.toBe("submitted");
+    }
   });
 });
