@@ -128,6 +128,7 @@ class S3Storage:
 
     def __init__(self, settings: Settings) -> None:
         import boto3  # noqa: PLC0415 - deliberate lazy import
+        from botocore.config import Config  # noqa: PLC0415 - deliberate lazy import
 
         self.bucket = settings.documents_s3_bucket
         if not self.bucket:
@@ -138,6 +139,7 @@ class S3Storage:
             region_name=settings.documents_s3_region or None,
             aws_access_key_id=settings.documents_s3_access_key_id or None,
             aws_secret_access_key=settings.documents_s3_secret_access_key or None,
+            config=Config(s3={"addressing_style": settings.documents_s3_addressing_style}),
         )
 
     def put_bytes(self, key: str, data: bytes) -> None:

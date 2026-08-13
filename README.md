@@ -183,7 +183,7 @@ Every uploaded or generated document belongs to a job, and every job belongs to 
 Binaries live outside PostgreSQL behind `DOCUMENTS_STORAGE_BACKEND`:
 
 - `local` (default): the `documents_data` volume, mounted at `/data/documents` in the `api` container.
-- `s3`: any S3-compatible store for production — set `DOCUMENTS_S3_BUCKET`, optional `DOCUMENTS_S3_ENDPOINT_URL` (non-AWS providers), `DOCUMENTS_S3_REGION`, and the key pair in deployment secrets.
+- `s3`: any S3-compatible store for production — set `DOCUMENTS_S3_BUCKET`, optional `DOCUMENTS_S3_ENDPOINT_URL` (non-AWS providers), `DOCUMENTS_S3_REGION`, and the key pair in deployment secrets. If the provider needs bucket-in-path or bucket-as-subdomain URLs, set `DOCUMENTS_S3_ADDRESSING_STYLE` to `path` or `virtual` (default `auto`).
 
 **Backups must cover the database and the object store together**: a database snapshot without the matching objects (or vice versa) restores documents whose files are missing. Take `pg_dump` and the object-store backup as one coordinated operation, and restore them as a pair. The authenticated `POST /api/v1/inbound/documents/reconcile` endpoint (run on a schedule by n8n, or manually) sweeps abandoned temporary objects and reports referenced-but-missing ones after a restore.
 

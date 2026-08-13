@@ -81,6 +81,10 @@ class Settings(BaseSettings):
     documents_s3_region: str = ""
     documents_s3_access_key_id: str = ""
     documents_s3_secret_access_key: str = ""
+    # "auto" lets boto3 decide (correct for AWS); some S3-compatible
+    # providers require "path" (bucket in the URL path) or "virtual"
+    # (bucket as a subdomain) when a custom endpoint is used.
+    documents_s3_addressing_style: Literal["auto", "path", "virtual"] = "auto"
 
     # --- Malware scanning ----------------------------------------------
     # Files stay quarantined until a scan succeeds. "clamd" streams to a

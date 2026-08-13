@@ -37,11 +37,25 @@ from app.services.storage import (
 from tests.test_job_documents import job_setup, pdf_bytes, png_bytes, upload  # noqa: F401
 
 TEST_ENDPOINT = os.environ.get("DOCUMENTS_S3_TEST_ENDPOINT")
+TEST_BUCKET = os.environ.get("DOCUMENTS_S3_TEST_BUCKET", "")
 
 pytestmark = pytest.mark.skipif(
     not TEST_ENDPOINT,
     reason="DOCUMENTS_S3_TEST_* not set; S3 integration tests need a disposable bucket",
 )
+
+
+@pytest.fixture(autouse=True)
+def _require_disposable_bucket_name():
+    """These tests DELETE unreferenced objects under the app prefixes. As a
+    guard against pointing them at a real bucket by mistake, the bucket name
+    must say it is disposable."""
+    if TEST_ENDPOINT and not any(word in TEST_BUCKET for word in ("test", "verify", "scratch")):
+        pytest.fail(
+            "DOCUMENTS_S3_TEST_BUCKET must contain 'test', 'verify' or 'scratch' "
+            "to make its disposability explicit — refusing to run against "
+            "a bucket that does not announce it."
+        )
 
 
 class AlwaysClean:
