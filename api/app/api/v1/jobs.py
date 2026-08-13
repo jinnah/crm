@@ -533,6 +533,36 @@ def restore_document(
     return _serialize_document(document)
 
 
+@router.post("/{job_id}/documents/{document_id}/rescan", response_model=JobDocumentOut)
+def rescan_document(
+    job_id: uuid.UUID,
+    document_id: uuid.UUID,
+    request: Request,
+    user: FullyAuthedUserDep,
+    db: DbDep,
+) -> JobDocumentOut:
+    """Retry malware scanning for a quarantined upload after a scanner
+    outage. Only pending/failed documents are eligible; a clean result
+    promotes the file, an infected result keeps it quarantined."""
+    try:
+        job = job_service.get_visible_job(db, user, job_id)
+        document = document_service.find_document(db, job, document_id)
+        if document.deleted_at is not None:
+            raise DocumentError("This document has been deleted.", status_code=404)
+        if document.scan_state not in ("pending", "failed") or document.quarantine_key is None:
+            raise DocumentError(
+                "Only quarantined documents awaiting a scan can be rescanned.", status_code=409
+            )
+        document = document_service.rescan(
+            db, _get_storage(request), _get_scanner(request), document
+        )
+        db.commit()
+    except _ERRORS as error:
+        db.rollback()
+        raise _http(error) from error
+    return _serialize_document(document)
+
+
 @router.post("/{job_id}/documents/{document_id}/move", response_model=JobDocumentOut)
 def move_document(
     job_id: uuid.UUID,

@@ -180,6 +180,69 @@ def test_scanner_outage_fails_closed(client, db, app, job_setup):
     assert download.status_code == 404
 
 
+def test_rescan_after_outage_promotes_and_serves(client, db, app, job_setup):
+    """The recovery path for fail-closed outages: a failed document can be
+    rescanned once the scanner is back, and a clean result promotes it."""
+    headers, _lead, job = job_setup
+
+    class DownScanner:
+        def scan_bytes(self, data):
+            raise ScannerUnavailable("connection refused")
+
+    working_scanner = app.state.document_scanner
+    app.state.document_scanner = DownScanner()
+    body = upload(client, headers, job["id"], pdf_bytes(), filename="permit.pdf").json()
+    assert body["scan_state"] == "failed"
+
+    app.state.document_scanner = working_scanner
+    rescanned = client.post(
+        f"/api/v1/jobs/{job['id']}/documents/{body['id']}/rescan", headers=headers
+    )
+    assert rescanned.status_code == 200, rescanned.text
+    assert rescanned.json()["scan_state"] == "clean"
+    row = db.get(JobDocument, uuid.UUID(body["id"]))
+    assert row.storage_key is not None and row.quarantine_key is None
+    download = client.get(f"/api/v1/jobs/{job['id']}/documents/{body['id']}/download")
+    assert download.status_code == 200
+
+
+def test_rescan_can_still_find_an_infection(client, db, app, job_setup):
+    headers, _lead, job = job_setup
+
+    class DownScanner:
+        def scan_bytes(self, data):
+            raise ScannerUnavailable("connection refused")
+
+    working_scanner = app.state.document_scanner
+    app.state.document_scanner = DownScanner()
+    payload = pdf_bytes() + b"\n%" + EICAR_SIGNATURE
+    body = upload(client, headers, job["id"], payload, filename="invoice.pdf").json()
+    assert body["scan_state"] == "failed"
+
+    app.state.document_scanner = working_scanner
+    rescanned = client.post(
+        f"/api/v1/jobs/{job['id']}/documents/{body['id']}/rescan", headers=headers
+    )
+    assert rescanned.status_code == 200
+    assert rescanned.json()["scan_state"] == "infected"
+    row = db.get(JobDocument, uuid.UUID(body["id"]))
+    assert row.storage_key is None and row.quarantine_key is not None
+    download = client.get(f"/api/v1/jobs/{job['id']}/documents/{body['id']}/download")
+    assert download.status_code == 404
+
+
+def test_rescan_refuses_ineligible_documents_and_strangers(client, job_setup):
+    headers, _lead, job = job_setup
+    clean = upload(client, headers, job["id"], pdf_bytes(), filename="quote.pdf").json()
+    assert clean["scan_state"] == "clean"
+    refused = client.post(
+        f"/api/v1/jobs/{job['id']}/documents/{clean['id']}/rescan", headers=headers
+    )
+    assert refused.status_code == 409
+    unauthenticated = client.post(f"/api/v1/jobs/{job['id']}/documents/{clean['id']}/rescan")
+    assert unauthenticated.status_code in (401, 403)
+
+
 def test_streamed_oversize_upload_is_rejected_before_parsing(client, job_setup):
     headers, _lead, job = job_setup
     huge = b"x" * (document_service.MAX_UPLOAD_BYTES + 128 * 1024)
